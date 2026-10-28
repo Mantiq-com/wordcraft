@@ -1,6 +1,6 @@
 use super::groups::command_menu;
 use super::tooltip::{keytip_badge, shortcut_text, show_hint, tooltip, tooltip_lines};
-use super::{Color32, CornerRadius, Rect, Response, Sense, Stroke, Tokens, Ui, Value, WordApp, icons, pos2, regular, vec2};
+use super::{Color32, Rect, Response, Sense, Stroke, Tokens, Ui, Value, WordApp, icons, pos2, regular, vec2};
 
 /// Height of the ribbon content area (without group labels).
 pub const CONTENT_H: f32 = 66.0;
@@ -44,9 +44,14 @@ pub(crate) fn bg(ui: &Ui, r: Rect, resp: &Response, checked: bool, t: &Tokens) {
     } else {
         return;
     };
-    ui.painter().rect_filled(r, CornerRadius::same(4), fill);
+    ui.painter().rect_filled(r, ui.visuals().widgets.inactive.corner_radius, fill);
     if checked {
-        ui.painter().rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, t.accent.linear_multiply(0.5)), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(
+            r,
+            ui.visuals().widgets.inactive.corner_radius,
+            Stroke::new(1.0, t.accent.linear_multiply(0.5)),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 

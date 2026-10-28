@@ -171,6 +171,14 @@ const { data } = await wordcraft.screenshot();            // the canvas as PNG (
 
 The API is there in every mode, with or without a host. Opening a file, handing a saved or exported file to the page, the file name and the unsaved flag stay with the host messages above.
 
+An embedding page gives the editor its own look with the `ui.hostTheme` command:
+
+```js
+await wordcraft.execute("ui.hostTheme", { light: { accent: "#885f1a" }, radius: 8, share: false });
+```
+
+Its fields are `{"light"?: {token: "#rrggbb"}, "dark"?: {..}, "radius"?: 0-16, "appearance"?: "light|dark|system", "community"?: bool, "share"?: bool, "hideTabs"?: [tab], "font"?: base64, "fontMedium"?: base64, "fontSemibold"?: base64}`. The tokens are those of `wordcraft_ui_egui::theme::Tokens` in camel case; an accent alone also tints the selection, checked buttons and the text on it. `community` and `share` say whether the community button and the Share button show, `hideTabs` names ribbon tabs to hide, and the fonts are the regular, medium and semibold interface faces as TTF, OTF, WOFF or WOFF2 files. The look lasts for the visit and is never saved with the preferences; `{}` returns to WordCraft's own.
+
 ## Renderer selection and fallback flags
 
 WordCraft renders with wgpu. It uses **WebGPU** when the browser has it and falls back to
