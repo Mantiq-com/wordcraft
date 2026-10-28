@@ -91,7 +91,8 @@ impl WordApp {
 
     /// Whether the interface theme setting currently resolves to dark (`System` asks the OS).
     pub fn ui_is_dark(&self) -> bool {
-        self.ui.theme.is_dark(self.ctx.as_ref().and_then(|ctx| system_theme(ctx, self.desktop_dark)))
+        let appearance = theme::host_appearance().unwrap_or(self.ui.theme);
+        appearance.is_dark(self.ctx.as_ref().and_then(|ctx| system_theme(ctx, self.desktop_dark)))
     }
 
     /// Whether animation effects are on: the Animation effects setting, where `System` follows

@@ -605,6 +605,25 @@ impl WordApp {
                 }
                 json!({"theme": self.ui.theme.code(), "dark": self.ui_is_dark()})
             }
+            "ui.hostTheme" => {
+                // The look a page that embeds WordCraft gives it for this visit: its colours,
+                // corner radius, fonts, appearance and whether the community button shows. `{}`
+                // returns to our own. Never saved with the preferences.
+                let host = if p.as_object().is_none_or(serde_json::Map::is_empty) {
+                    None
+                } else {
+                    match theme::HostTheme::from_json(p) {
+                        Ok(host) => Some(host),
+                        Err(e) => return Some(Err(e)),
+                    }
+                };
+                let set = host.is_some();
+                theme::set_host_theme(host);
+                // Re-install the styles and fonts on the next frame.
+                self.applied_theme = None;
+                self.styled = false;
+                json!({"hostTheme": set, "dark": self.ui_is_dark()})
+            }
             "ui.interfaceSize" => {
                 // `auto` (the display scale the system reports) or an absolute size in percent,
                 // 50–300 (clamped); no value reads it. `percent` in the result is the size the
@@ -1008,6 +1027,7 @@ pub(crate) fn works_without_document(id: &str) -> bool {
             | "ui.keytips"
             | "ui.dark"
             | "ui.theme"
+            | "ui.hostTheme"
             | "ui.interfaceSize"
             | "ui.animations"
             | "ui.language"

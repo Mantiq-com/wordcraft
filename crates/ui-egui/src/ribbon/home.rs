@@ -13,7 +13,7 @@ fn format_painter_button(ui: &mut Ui, app: &mut WordApp) {
         painter_double_click(app);
     } else if armed && !sticky {
         let t = Tokens::get(ui.ctx());
-        ui.painter().rect_stroke(resp.rect, egui::CornerRadius::same(4), Stroke::new(1.0, t.accent.linear_multiply(0.5)), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(resp.rect, ui.visuals().widgets.inactive.corner_radius, Stroke::new(1.0, t.accent.linear_multiply(0.5)), egui::StrokeKind::Inside);
     }
 }
 

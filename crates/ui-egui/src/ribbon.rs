@@ -108,7 +108,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     // Format) may be stored while the selection moved away, and a tab may have been hidden.
     let user_tabs = app.session.ribbon.tabs().into_owned();
     let mut tabs: Vec<(String, bool)> = vec![("File".to_string(), false)];
-    tabs.extend(user_tabs.iter().filter(|e| !e.hidden).map(|e| (e.name.clone(), e.custom)));
+    tabs.extend(user_tabs.iter().filter(|e| !e.hidden && !crate::theme::host_hides_tab(&e.name)).map(|e| (e.name.clone(), e.custom)));
     for ct in contextual_tabs(&app.session) {
         if ct == "Outlining" {
             tabs.insert(1.min(tabs.len()), (ct.to_string(), false));
@@ -138,10 +138,18 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 let comments = tl!("Comments");
                 let share_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(share.to_string(), medium(12.0), t.text).size().x);
                 let spaced = |w: f32| w + 2.0;
+                let show_share = crate::theme::host_shows_share();
                 let button_widths = |level: usize| -> f32 {
                     let labels = level == 0;
                     let share_full = (share_w + 36.0).max(74.0);
-                    let share_button = if level < 2 { share_full } else { 30.0 };
+                    // A hidden Share button gives back its width and the 6 pt gap after it.
+                    let share_button = if !show_share {
+                        -8.0
+                    } else if level < 2 {
+                        share_full
+                    } else {
+                        30.0
+                    };
                     let editing = crate::widgets::icon_text_button_width(ui, editing_label, regular(12.0), true, labels);
                     let comment = crate::widgets::icon_text_button_width(ui, comments, regular(12.0), false, labels);
                     // The gaps (6 + 4 + 8) and the strip's margin.
@@ -166,26 +174,32 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                     // tabs took clicks that did nothing, so the empty window had no way back to
                     // the Start screen (#3045).
                     ui.add_enabled_ui(app.has_document(), |ui| {
-                        let (share_size, share_text) =
-                            if plan.buttons < 2 { (((share_w + 36.0).max(74.0), 24.0), true) } else { ((30.0, 24.0), false) };
-                        let (r, resp) = ui.allocate_exact_size(vec2(share_size.0, share_size.1), Sense::click());
-                        ui.painter().rect_filled(r, 4.0, if resp.hovered() { t.accent_text } else { t.accent });
-                        let icon_x = if share_text { r.min.x + 14.0 } else { r.center().x };
-                        icons::paint(
-                            ui.painter(),
-                            Rect::from_center_size(pos2(icon_x, r.center().y), vec2(14.0, 14.0)),
-                            "share",
-                            t.on_accent,
-                            t.on_accent,
-                        );
-                        if share_text {
-                            ui.painter().text(pos2(r.min.x + 26.0, r.center().y), Align2::LEFT_CENTER, share, medium(12.0), t.on_accent);
+                        if show_share {
+                            let (share_size, share_text) =
+                                if plan.buttons < 2 { (((share_w + 36.0).max(74.0), 24.0), true) } else { ((30.0, 24.0), false) };
+                            let (r, resp) = ui.allocate_exact_size(vec2(share_size.0, share_size.1), Sense::click());
+                            ui.painter().rect_filled(
+                                r,
+                                ui.visuals().widgets.inactive.corner_radius,
+                                if resp.hovered() { t.accent_text } else { t.accent },
+                            );
+                            let icon_x = if share_text { r.min.x + 14.0 } else { r.center().x };
+                            icons::paint(
+                                ui.painter(),
+                                Rect::from_center_size(pos2(icon_x, r.center().y), vec2(14.0, 14.0)),
+                                "share",
+                                t.on_accent,
+                                t.on_accent,
+                            );
+                            if share_text {
+                                ui.painter().text(pos2(r.min.x + 26.0, r.center().y), Align2::LEFT_CENTER, share, medium(12.0), t.on_accent);
+                            }
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, share));
+                            if resp.on_hover_text(tl!("Export a copy to share (PDF, Word document)")).clicked() {
+                                let _ = app.run("ui.backstage", json!({"value": true, "page": "export"}));
+                            }
+                            ui.add_space(6.0);
                         }
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, share));
-                        if resp.on_hover_text(tl!("Export a copy to share (PDF, Word document)")).clicked() {
-                            let _ = app.run("ui.backstage", json!({"value": true, "page": "export"}));
-                        }
-                        ui.add_space(6.0);
                         let track = app.session.doc.settings.track_changes;
                         let mode = if plan.buttons == 0 {
                             crate::widgets::icon_text_menu_button(ui, "pencil", editing_label, regular(12.0))
