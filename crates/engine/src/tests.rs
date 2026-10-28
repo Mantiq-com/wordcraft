@@ -9859,6 +9859,33 @@ fn a_repeated_comparison_is_still_an_edit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A page without a file system compares documents it holds as bytes: `data` and
+/// `originalData` carry them, and `path` and `original` only name them.
+#[test]
+fn compare_reads_both_documents_from_bytes() {
+    let docx = |text: &str| {
+        let bytes = crate::io::save_bytes("x.docx", &wordcraft_doc::Document::from_text(text)).unwrap();
+        crate::cmd::insert::base64_encode(&bytes)
+    };
+    let mut s = Session::new(wordcraft_doc::Document::from_text("Current document."));
+    let compare = json!({
+        "original": "no-such-dir/original.docx",
+        "originalData": docx("The term is 30 days."),
+        "path": "no-such-dir/revised.docx",
+        "data": docx("The term is 45 days."),
+    });
+    let r = run(&mut s, "review.compare", compare);
+    assert!(r["changes"].as_u64().unwrap() > 0, "{r}");
+    let changes = run(&mut s, "review.changes", json!({}));
+    assert!(!changes.as_array().unwrap().is_empty(), "the result carries tracked changes: {changes}");
+    run(&mut s, "review.acceptAll", json!({}));
+    assert_eq!(text(&s), "The term is 45 days.");
+    assert!(s.path.is_none(), "the result is untitled and never saves over either document");
+
+    let bad = json!({"original": "a.docx", "originalData": "not base64!", "text": "x"});
+    assert!(s.run("review.compare", &bad).is_err());
+}
+
 /// A rejected comparison leaves the current document and its snapshots together.
 #[test]
 fn a_rejected_comparison_keeps_the_current_versions() {
