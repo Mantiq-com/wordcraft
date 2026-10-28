@@ -1,8 +1,13 @@
+use wordcraft_doc::fill::Fill;
+use wordcraft_doc::para::{Anchor, Float, FloatAlign, NoteKind, ShapeKind, Wrap, WrapText};
+use wordcraft_doc::{InlineObject, MAX_TEXT_BOX_INSET, PartKind, Rgb, TextBody};
+
 use super::import::Pages;
-use super::limits::{MAX_INFO_CHARS, MAX_OPEN_INSERTIONS, MAX_REGIONS, MAX_SECTIONS, MAX_XML_DEPTH};
-use super::styles::Styles;
+use super::limits::{MAX_COMMENTS, MAX_INFO_CHARS, MAX_OPEN_INSERTIONS, MAX_REGIONS, MAX_SECTIONS, MAX_STORY_DEPTH, MAX_XML_DEPTH};
+use super::styles::{Graphic, Styles};
 use super::xml::{Attrs, Ev, events, get, length, local};
 use super::{Cell, FBlock, FTable, Fmt, HashMap, Inline, Kind, ListInfo, Para, RevMark, RevisionKind, SectionProps, SectionStart, make_img, model};
+use crate::model::FObject;
 
 /// An embedded ODF formula sub-document's `content.xml`, read for its `math:math` element
 /// (ODF 1.3 §10.4.3.2 wraps it in `office:document-content`/`office:body`/`office:math`, but
@@ -127,9 +132,18 @@ pub(super) struct Body<'a> {
     pub(super) in_text: bool,
     skip: usize,
     depth: usize,
-    /// `(width, height, picture bytes, alt text, equation read from an embedded `draw:object`)`.
-    frame: Option<(Option<f32>, Option<f32>, Option<Vec<u8>>, String, Option<(String, bool)>)>,
+    frame: Option<Frame>,
     in_desc: bool,
+    /// Notes, comments, text boxes and shapes being read, innermost last.
+    stories: Vec<Story>,
+    /// The comments read, in document order: a comment's index is the id its marks carry.
+    pub(super) comments: Vec<ReadComment>,
+    /// Comment index by `office:name`, for a range's end and a reply's parent.
+    comment_names: HashMap<String, usize>,
+    /// Notes and comments are read: in the body, not in a header or footer.
+    pub(super) with_notes: bool,
+    /// The element whose text is kept apart (a comment's author, a field's result), and that text.
+    capture: Option<(Capture, String)>,
     /// The master pages' page setups.
     pages: &'a Pages,
     /// The current master page's setup (a column section's page, without its columns).
@@ -180,6 +194,11 @@ impl<'a> Body<'a> {
             depth: 0,
             frame: None,
             in_desc: false,
+            stories: Vec::new(),
+            comments: Vec::new(),
+            comment_names: HashMap::new(),
+            with_notes: false,
+            capture: None,
             pages,
             sec: page.clone(),
             page,
@@ -230,6 +249,10 @@ impl<'a> Body<'a> {
             if !t.rows.is_empty() {
                 blocks.push(FBlock::Table(t.finish()));
             }
+        }
+        let open: Vec<u32> = self.comments.iter().enumerate().filter(|(_, c)| c.parent.is_none() && !c.ended).map(|(i, _)| i as u32).collect();
+        if !open.is_empty() {
+            close_comments(&mut blocks, &open);
         }
         blocks
     }
@@ -321,8 +344,9 @@ impl Body<'_> {
             && self.lists.last().is_some_and(|l| l.1)
         {
             let style = self.lists.iter().rev().find_map(|l| l.0.clone());
-            let ordered = style.and_then(|s| self.styles.lists.get(&s)).and_then(|v| v.get(lv.min(9)).copied()).unwrap_or(false);
+            let ordered = style.as_ref().and_then(|s| self.styles.lists.get(s)).and_then(|v| v.get(lv.min(9)).copied()).unwrap_or(false);
             p.list = Some(ListInfo { ordered, level: lv.min(8) as u8, start: 1 });
+            p.list_levels = style.and_then(|s| self.styles.list_levels.get(&s).cloned());
             self.para_cont = self.item_used.last().copied().unwrap_or(false);
             if let Some(u) = self.item_used.last_mut() {
                 *u = true;
@@ -434,9 +458,14 @@ impl Body<'_> {
         if self.in_tc && self.del.is_none() {
             return;
         }
+        if let Some((_, s)) = &mut self.capture {
+            let room = MAX_INFO_CHARS.saturating_sub(s.chars().count());
+            s.extend(t.chars().take(room));
+            return;
+        }
         if self.in_desc {
             if let Some(fr) = &mut self.frame {
-                fr.3.push_str(t);
+                fr.alt.push_str(t);
             }
             return;
         }
@@ -491,7 +520,7 @@ impl Body<'_> {
         if self.tracked_context(q, a) {
             return;
         }
-        if self.start_inline(q, a) {
+        if self.start_inline(q, a) || self.start_story(q, a) {
             return;
         }
         match local(q) {
@@ -513,23 +542,7 @@ impl Body<'_> {
                 }
             }
             "change-start" | "change-end" => change_mark(&self.regions, &mut self.active_ins, local(q) == "change-start", a),
-            "note"
-            | "annotation"
-            | "text-box"
-            | "sequence-decls"
-            | "forms"
-            | "variable-decls"
-            | "user-field-decls"
-            | "index-title-template"
-            | "table-of-content-source" => {
-                self.skip = 1;
-            }
-            // Drawing shapes (ODF 1.3 §10.3), with their text, until shapes are read (#1654).
-            // Groups are walked, so the pictures in them still are.
-            "rect" | "line" | "polyline" | "polygon" | "regular-polygon" | "path" | "circle" | "ellipse" | "connector" | "caption" | "measure"
-            | "custom-shape"
-                if q.starts_with("draw:") =>
-            {
+            "sequence-decls" | "forms" | "variable-decls" | "user-field-decls" | "index-title-template" | "table-of-content-source" | "text-box" => {
                 self.skip = 1;
             }
             "p" | "h" if !self.in_desc => {
@@ -603,18 +616,23 @@ impl Body<'_> {
                 }
             }
             "frame" => {
-                let w = get(a, "svg:width").and_then(length);
-                let h = get(a, "svg:height").and_then(length);
-                self.frame = Some((w, h, None, String::new(), None));
+                let graphic = get(a, "draw:style-name").map(|s| self.styles.graphic(s)).unwrap_or_default();
+                self.frame = Some(Frame {
+                    w: get(a, "svg:width").and_then(length),
+                    h: get(a, "svg:height").and_then(length),
+                    float: placement(a, &graphic, Wrap::Square),
+                    graphic,
+                    ..Default::default()
+                });
             }
             "image" => {
                 if let Some(href) = get(a, "xlink:href")
                     && let Some(fr) = &mut self.frame
-                    && fr.2.is_none()
-                    && fr.4.is_none()
+                    && fr.img.is_none()
+                    && fr.eq.is_none()
                 {
                     let path = href.trim_start_matches("./");
-                    fr.2 = (self.zip)(path);
+                    fr.img = (self.zip)(path);
                 }
             }
             // An embedded object (ODF 1.3 §10.4.3): a formula sub-document's `content.xml` holds
@@ -623,11 +641,11 @@ impl Body<'_> {
             "object" => {
                 if let Some(href) = get(a, "xlink:href")
                     && let Some(fr) = &mut self.frame
-                    && fr.4.is_none()
+                    && fr.eq.is_none()
                 {
                     let path = format!("{}/content.xml", href.trim_start_matches("./").trim_end_matches('/'));
                     if let Some(xml) = (self.zip)(&path) {
-                        fr.4 = read_formula(&xml);
+                        fr.eq = read_formula(&xml);
                     }
                 }
             }
@@ -837,6 +855,22 @@ impl Body<'_> {
                     }
                 }
             }
+            // Page number and page count (ODF 1.3 §7.3.5, §7.5.18): fields, so they count the
+            // pages of the document they are shown in. Their text is the result last shown.
+            "page-number" | "page-count" if q.starts_with("text:") => {
+                let instr = if local(q) == "page-number" { "PAGE" } else { "NUMPAGES" };
+                self.capture = Some((Capture::Field(instr), String::new()));
+            }
+            "annotation-end" if q.starts_with("office:") => {
+                if let Some(&idx) = get(a, "office:name").and_then(|n| self.comment_names.get(n))
+                    && self.comments.get(idx).is_some_and(|c| c.parent.is_none() && !c.ended)
+                {
+                    if let Some(c) = self.comments.get_mut(idx) {
+                        c.ended = true;
+                    }
+                    self.push_object(InlineObject::CommentEnd { id: idx as u32 }, None, TextBody::default());
+                }
+            }
             _ => return false,
         }
         true
@@ -861,6 +895,14 @@ impl Body<'_> {
             return;
         }
         if !self.in_text {
+            return;
+        }
+        if let Some((what, text)) = self.capture.take() {
+            self.end_capture(what, text);
+            return;
+        }
+        if self.stories.last().is_some_and(|s| s.at == self.depth + 1) {
+            self.close_story();
             return;
         }
         if let Some(d) = self.info_at {
@@ -958,10 +1000,15 @@ impl Body<'_> {
                 self.break_section(next);
             }
             "frame" => {
-                if let Some((w, h, img, alt, eq)) = self.frame.take() {
-                    let inline = match eq {
+                if let Some(fr) = self.frame.take() {
+                    if let Some(text) = fr.text {
+                        let grows = fr.h.is_none() || fr.min_h.is_some() || fr.graphic.min_height == Some(true);
+                        self.push_text_box(text, fr.w, fr.h.or(fr.min_h), grows, fr.float, &fr.graphic);
+                        return;
+                    }
+                    let inline = match fr.eq {
                         Some((linear, display)) => Some(Inline::Equation { linear, display }),
-                        None => img.and_then(|data| make_img(data, w, h, alt.trim())).map(Inline::Image),
+                        None => fr.img.and_then(|data| make_img(data, fr.w, fr.h, fr.alt.trim())).map(Inline::Image),
                     };
                     if let Some(inline) = inline {
                         if self.para.is_none() {
@@ -972,7 +1019,6 @@ impl Body<'_> {
                         }
                     }
                 }
-                self.frame = None;
             }
             _ => {}
         }
@@ -994,5 +1040,537 @@ fn change_mark(regions: &HashMap<String, Region>, open: &mut Vec<(String, RevMar
         && !open.iter().any(|(o, _)| o == id)
     {
         open.push((id.to_string(), r.mark()));
+    }
+}
+
+/// A `draw:frame` being read: a picture, an equation or a text box.
+#[derive(Default)]
+struct Frame {
+    w: Option<f32>,
+    h: Option<f32>,
+    img: Option<Vec<u8>>,
+    alt: String,
+    /// An equation read from an embedded `draw:object`.
+    eq: Option<(String, bool)>,
+    /// Its `draw:text-box`'s text, once read, and that box's least height.
+    text: Option<Vec<FBlock>>,
+    min_h: Option<f32>,
+    float: Float,
+    graphic: Graphic,
+}
+
+/// A comment read from an `office:annotation` (ODF 1.3 §14.1).
+#[derive(Default)]
+pub(super) struct ReadComment {
+    pub(super) author: String,
+    pub(super) initials: String,
+    pub(super) date: String,
+    /// The comment this one answers (`loext:parent-name`). A reply marks no text of its own.
+    pub(super) parent: Option<usize>,
+    pub(super) resolved: bool,
+    pub(super) blocks: Vec<FBlock>,
+    /// Its range has ended.
+    ended: bool,
+}
+
+/// Where the text of the element being read goes.
+#[derive(Clone, Copy)]
+enum Capture {
+    Author,
+    Date,
+    Initials,
+    /// A field's result, for the field with this code.
+    Field(&'static str),
+}
+
+enum StoryKind {
+    Note {
+        kind: NoteKind,
+        custom: String,
+    },
+    Comment {
+        idx: usize,
+        named: bool,
+    },
+    /// The text of the open frame's text box.
+    TextBox,
+    Shape(Box<ShapeRead>),
+}
+
+/// A drawing shape being read (ODF 1.3 §10.3).
+struct ShapeRead {
+    kind: ShapeKind,
+    w: Option<f32>,
+    h: Option<f32>,
+    float: Float,
+    graphic: Graphic,
+}
+
+/// What a note's, comment's, text box's or shape's text interrupted: the reader's state when its
+/// element started, put back when it ends.
+struct Story {
+    kind: StoryKind,
+    /// Element depth of the story's element.
+    at: usize,
+    containers: usize,
+    para: Option<Para>,
+    fmt: Vec<Fmt>,
+    lists: Vec<(Option<String>, bool)>,
+    item_used: Vec<bool>,
+    lists_saved: Vec<(Vec<(Option<String>, bool)>, Vec<bool>)>,
+    tables: Vec<TableB>,
+    cells: Vec<Cell>,
+    para_cont: bool,
+    xml_space_end: bool,
+    frame: Option<Frame>,
+    in_desc: bool,
+}
+
+/// LibreOffice's own fill and outline of a shape whose style gives none.
+const SHAPE_FILL: Rgb = Rgb(0x72, 0x9f, 0xcf);
+const SHAPE_STROKE: Rgb = Rgb(0x34, 0x65, 0xa4);
+
+impl Body<'_> {
+    /// An element of a note, comment, text box or drawing shape (`q`, attributes `a`); false when
+    /// `q` is none.
+    fn start_story(&mut self, q: &str, a: &Attrs) -> bool {
+        match local(q) {
+            // A comment's author, date and initials (ODF 1.3 §14.1), its first elements.
+            "creator" | "date" | "creator-initials" | "sender-initials" if self.in_comment_head() => {
+                let what = match local(q) {
+                    "creator" => Capture::Author,
+                    "date" => Capture::Date,
+                    _ => Capture::Initials,
+                };
+                self.capture = Some((what, String::new()));
+            }
+            // A note's number, or the mark it shows instead (`text:label`).
+            "note-citation" => {
+                if let Some(Story { kind: StoryKind::Note { custom, .. }, .. }) = self.stories.last_mut() {
+                    *custom = get(a, "text:label").map(|l| l.trim().chars().take(MAX_INFO_CHARS).collect()).unwrap_or_default();
+                }
+                self.skip = 1;
+            }
+            "note" if q.starts_with("text:") => {
+                if !self.with_notes || self.in_note() || self.stories.len() >= MAX_STORY_DEPTH {
+                    self.skip = 1;
+                    return true;
+                }
+                let kind = if get(a, "text:note-class") == Some("endnote") { NoteKind::Endnote } else { NoteKind::Footnote };
+                self.begin_story(StoryKind::Note { kind, custom: String::new() });
+            }
+            "annotation" if q.starts_with("office:") => self.start_comment(a),
+            "text-box" if self.frame.is_some() && self.stories.len() < MAX_STORY_DEPTH => {
+                if let Some(fr) = &mut self.frame {
+                    fr.min_h = get(a, "fo:min-height").and_then(length).filter(|h| *h > 0.0);
+                }
+                self.begin_story(StoryKind::TextBox);
+            }
+            // Drawing shapes (ODF 1.3 §10.3), with their text. Groups are walked, so the pictures
+            // and shapes in them are read one by one.
+            "rect" | "line" | "polyline" | "polygon" | "regular-polygon" | "path" | "circle" | "ellipse" | "connector" | "caption" | "measure"
+            | "custom-shape"
+                if q.starts_with("draw:") =>
+            {
+                if self.stories.len() >= MAX_STORY_DEPTH {
+                    self.skip = 1;
+                    return true;
+                }
+                let shape = self.shape(local(q), a);
+                self.begin_story(StoryKind::Shape(Box::new(shape)));
+            }
+            // A custom shape's geometry, after its text: its outline's kind.
+            "enhanced-geometry" => {
+                if let Some(Story { kind: StoryKind::Shape(s), .. }) = self.stories.last_mut()
+                    && let Some(kind) = get(a, "draw:type").and_then(custom_shape_kind)
+                {
+                    s.kind = kind;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// An `office:annotation`: a comment, read as a story of its own, unless notes and comments
+    /// are left out here or it sits in another story.
+    fn start_comment(&mut self, a: &Attrs) {
+        if !self.with_notes || !self.stories.is_empty() || self.comments.len() >= MAX_COMMENTS {
+            self.skip = 1;
+            return;
+        }
+        let idx = self.comments.len();
+        let name = get(a, "office:name").filter(|n| !n.is_empty());
+        let parent = get(a, "loext:parent-name").and_then(|p| self.comment_names.get(p).copied());
+        self.comments.push(ReadComment { parent, resolved: get(a, "loext:resolved") == Some("true"), ..Default::default() });
+        if let Some(n) = name {
+            self.comment_names.entry(n.to_string()).or_insert(idx);
+        }
+        self.begin_story(StoryKind::Comment { idx, named: name.is_some() });
+    }
+
+    /// Reading the elements that open a comment: its author, date and initials.
+    fn in_comment_head(&self) -> bool {
+        self.stories.last().is_some_and(|s| matches!(s.kind, StoryKind::Comment { .. }) && s.at + 1 == self.depth)
+    }
+
+    fn in_note(&self) -> bool {
+        self.stories.iter().any(|s| matches!(s.kind, StoryKind::Note { .. }))
+    }
+
+    /// Read what follows, up to the end of the element just started, as a story of its own.
+    fn begin_story(&mut self, kind: StoryKind) {
+        use std::mem::take;
+        let story = Story {
+            kind,
+            at: self.depth,
+            containers: self.containers.len(),
+            para: self.para.take(),
+            fmt: take(&mut self.fmt),
+            lists: take(&mut self.lists),
+            item_used: take(&mut self.item_used),
+            lists_saved: take(&mut self.lists_saved),
+            tables: take(&mut self.tables),
+            cells: take(&mut self.cells),
+            para_cont: take(&mut self.para_cont),
+            xml_space_end: take(&mut self.xml_space_end),
+            frame: self.frame.take(),
+            in_desc: take(&mut self.in_desc),
+        };
+        self.stories.push(story);
+        self.containers.push(Vec::new());
+    }
+
+    /// End the innermost story: its text goes to the note, comment, text box or shape, which
+    /// takes its place in the text the story interrupted.
+    fn close_story(&mut self) {
+        self.end_para();
+        let Some(s) = self.stories.pop() else { return };
+        let mut blocks: Vec<FBlock> = self.containers.split_off(s.containers.min(self.containers.len())).into_iter().flatten().collect();
+        for t in std::mem::take(&mut self.tables) {
+            if !t.rows.is_empty() {
+                blocks.push(FBlock::Table(t.finish()));
+            }
+        }
+        if self.containers.is_empty() {
+            self.containers.push(Vec::new());
+        }
+        self.para = s.para;
+        self.fmt = s.fmt;
+        self.lists = s.lists;
+        self.item_used = s.item_used;
+        self.lists_saved = s.lists_saved;
+        self.tables = s.tables;
+        self.cells = s.cells;
+        self.para_cont = s.para_cont;
+        self.xml_space_end = s.xml_space_end;
+        self.frame = s.frame;
+        self.in_desc = s.in_desc;
+        match s.kind {
+            StoryKind::Note { kind, custom } => {
+                // A note's text starts with its own mark, as the notes Word writes do.
+                let mark = Inline::Object(Box::new(FObject {
+                    obj: InlineObject::NoteRef { kind, id: 0, custom: custom.clone() },
+                    fmt: Fmt::default(),
+                    story: None,
+                    body: TextBody::default(),
+                }));
+                match blocks.first_mut() {
+                    Some(FBlock::Para(p)) => p.inlines.insert(0, mark),
+                    _ => blocks.insert(0, FBlock::Para(Para { inlines: vec![mark], ..Default::default() })),
+                }
+                let part = if kind == NoteKind::Endnote { PartKind::Endnote } else { PartKind::Footnote };
+                self.push_object(InlineObject::NoteRef { kind, id: 0, custom }, Some((part, blocks)), TextBody::default());
+            }
+            StoryKind::Comment { idx, named } => {
+                let Some(c) = self.comments.get_mut(idx) else { return };
+                c.blocks = blocks;
+                if c.parent.is_some() {
+                    return;
+                }
+                // A comment without a name marks no range: it starts and ends where it stands.
+                c.ended = !named;
+                self.push_object(InlineObject::CommentStart { id: idx as u32 }, None, TextBody::default());
+                if !named {
+                    self.push_object(InlineObject::CommentEnd { id: idx as u32 }, None, TextBody::default());
+                }
+            }
+            StoryKind::TextBox => {
+                if let Some(fr) = &mut self.frame {
+                    fr.text = Some(blocks);
+                }
+            }
+            StoryKind::Shape(shape) => self.push_shape(*shape, blocks),
+        }
+    }
+
+    /// The text kept apart from the element just ended, where it belongs.
+    fn end_capture(&mut self, what: Capture, text: String) {
+        let text = text.trim().to_string();
+        let comment = match self.stories.last() {
+            Some(Story { kind: StoryKind::Comment { idx, .. }, .. }) => Some(*idx),
+            _ => None,
+        };
+        match what {
+            Capture::Field(instr) => {
+                let field =
+                    InlineObject::Field { instr: instr.to_string(), result: text, locked: false, dirty: false, code: false, form: String::new() };
+                self.push_object(field, None, TextBody::default());
+            }
+            Capture::Author | Capture::Date | Capture::Initials => {
+                let Some(c) = comment.and_then(|i| self.comments.get_mut(i)) else { return };
+                match what {
+                    Capture::Author => c.author = text,
+                    Capture::Date => c.date = text,
+                    _ => c.initials = text,
+                }
+            }
+        }
+    }
+
+    /// Add `obj` to the paragraph being read, with the text `story` it points at.
+    fn push_object(&mut self, obj: InlineObject, story: Option<(PartKind, Vec<FBlock>)>, body: TextBody) {
+        if self.para.is_none() {
+            self.start_para(None, None);
+        }
+        let mut fmt = self.cur_fmt();
+        fmt.ins = self.open_insertion();
+        self.xml_space_end = false;
+        if let Some(p) = &mut self.para {
+            p.inlines.push(Inline::Object(Box::new(FObject { obj, fmt, story, body })));
+        }
+    }
+
+    /// A frame's text box, `text` its content. A box `grows` when its height is only the least it
+    /// may have (`fo:min-height`), as LibreOffice grows it to its text.
+    fn push_text_box(&mut self, text: Vec<FBlock>, w: Option<f32>, h: Option<f32>, grows: bool, float: Float, g: &Graphic) {
+        let lines = text.len().max(1) as f32;
+        let w = w.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(144.0).clamp(4.0, 1584.0);
+        let h = h.filter(|h| h.is_finite() && *h > 0.0).unwrap_or(lines * 14.0 + 8.0).clamp(4.0, 1584.0);
+        let stroke = g.stroke.flatten();
+        let obj = InlineObject::Shape {
+            kind: ShapeKind::TextBox,
+            w,
+            h,
+            fill: g.fill.flatten().map(Fill::solid),
+            stroke: stroke.map(|s| s.0),
+            stroke_width: stroke.map_or(0.0, |s| s.1),
+            float,
+            story: None,
+            freeform: None,
+            effects: Default::default(),
+            extra: Default::default(),
+        };
+        // A frame without padding sets its text against its border, where Word's own inset
+        // would leave room.
+        let body = TextBody { inset: Some(inset(g.padding.unwrap_or(0.0))), auto_fit: grows, ..Default::default() };
+        self.push_object(obj, Some((PartKind::TextBox, text)), body);
+    }
+
+    /// A drawing shape with its text: an outline Word knows, or only its text where the outline is
+    /// one read here as none (a polygon, a path).
+    fn push_shape(&mut self, s: ShapeRead, text: Vec<FBlock>) {
+        let has_text = text.iter().any(|b| !matches!(b, FBlock::Para(p) if p.is_empty()));
+        let outline = s.kind != ShapeKind::TextBox;
+        if !has_text && !outline {
+            return;
+        }
+        let line = s.kind == ShapeKind::Line;
+        let size = |v: Option<f32>| v.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(72.0).clamp(if line { 0.0 } else { 1.0 }, 1584.0);
+        // LibreOffice runs a shape's text on past its edges unless the style wraps it; Word wraps
+        // it, and the box would then grow over the text below. Widen the box to its longest line.
+        let w = match (has_text, s.graphic.wraps_text) {
+            (true, None | Some(false)) => size(s.w).max(text_width(&text, s.graphic.padding)).min(1584.0),
+            _ => size(s.w),
+        };
+        let (fill, stroke) = if outline {
+            let fill = if line { None } else { s.graphic.fill.unwrap_or(Some(SHAPE_FILL)) };
+            (fill, s.graphic.stroke.unwrap_or(Some((SHAPE_STROKE, 0.75))))
+        } else {
+            (None, None)
+        };
+        let obj = InlineObject::Shape {
+            kind: s.kind,
+            w,
+            h: size(s.h),
+            fill: fill.map(Fill::solid),
+            stroke: stroke.map(|s| s.0),
+            stroke_width: stroke.map_or(0.0, |s| s.1),
+            float: s.float,
+            story: None,
+            freeform: None,
+            effects: Default::default(),
+            extra: Default::default(),
+        };
+        let story = has_text.then_some((PartKind::TextBox, text));
+        // A shape grows to its text unless its style says it doesn't, so none of its text is cut.
+        let body = TextBody { inset: s.graphic.padding.map(inset), auto_fit: has_text && s.graphic.auto_grow != Some(false), ..Default::default() };
+        self.push_object(obj, story, body);
+    }
+
+    /// The shape a `draw:` element (local name `name`) draws, where and how large.
+    fn shape(&self, name: &str, a: &Attrs) -> ShapeRead {
+        let graphic = get(a, "draw:style-name").map(|s| self.styles.graphic(s)).unwrap_or_default();
+        let mut float = placement(a, &graphic, Wrap::InFrontOfText);
+        let num = |k: &str| get(a, k).and_then(length);
+        let (kind, w, h) = match name {
+            "line" | "connector" => {
+                let (x1, y1) = (num("svg:x1").unwrap_or(0.0), num("svg:y1").unwrap_or(0.0));
+                let (x2, y2) = (num("svg:x2").unwrap_or(x1), num("svg:y2").unwrap_or(y1));
+                if float.wrap != Wrap::Inline {
+                    float.x = x1.min(x2);
+                    float.y = y1.min(y2);
+                }
+                // A line runs from the top left to the bottom right corner of its box, unless flipped.
+                float.flip_h = x2 < x1;
+                float.flip_v = y2 < y1;
+                (ShapeKind::Line, Some((x2 - x1).abs()), Some((y2 - y1).abs()))
+            }
+            "rect" => {
+                let round = num("draw:corner-radius").is_some_and(|r| r > 0.0);
+                (if round { ShapeKind::RoundedRectangle } else { ShapeKind::Rectangle }, num("svg:width"), num("svg:height"))
+            }
+            "ellipse" | "circle" => (ShapeKind::Ellipse, num("svg:width"), num("svg:height")),
+            // A custom shape's outline is named by its geometry, read after its text; until then,
+            // and for a geometry Word has no preset for, only its text is shown.
+            _ => (ShapeKind::TextBox, num("svg:width"), num("svg:height")),
+        };
+        ShapeRead { kind, w, h, float, graphic }
+    }
+}
+
+/// `padding` points as a text box's internal margins on every side, in EMU.
+fn inset(padding: f32) -> [u32; 4] {
+    [((padding * 12_700.0) as u32).min(MAX_TEXT_BOX_INSET); 4]
+}
+
+/// About how wide a box must be for the longest paragraph of `text` to fit on one line, with its
+/// inner margins (`padding` points each side, else Word's 7.2): no font is measured here, so each
+/// character counts as most of an en of its size.
+fn text_width(text: &[FBlock], padding: Option<f32>) -> f32 {
+    let longest = text
+        .iter()
+        .filter_map(|b| match b {
+            FBlock::Para(p) => Some(
+                p.inlines
+                    .iter()
+                    .map(|i| match i {
+                        Inline::Text(t, f) => t.chars().count() as f32 * f.size.unwrap_or(11.0) * 0.55,
+                        _ => 0.0,
+                    })
+                    .sum::<f32>(),
+            ),
+            FBlock::Table(_) => None,
+        })
+        .fold(0.0, f32::max);
+    longest + 2.0 * padding.unwrap_or(7.2)
+}
+
+/// Where a frame or shape with attributes `a` and style `g` sits: in line with the text when
+/// anchored as a character, else floating, relative to the page, the paragraph or the character it
+/// is anchored to (ODF 1.3 §19.874), and wrapped as its style says (`wrap` when it says nothing).
+fn placement(a: &Attrs, g: &Graphic, wrap: Wrap) -> Float {
+    let anchor = get(a, "text:anchor-type").unwrap_or("paragraph");
+    if anchor == "as-char" {
+        return Float::default();
+    }
+    let (h_def, v_def) = match anchor {
+        "page" => (Anchor::Page, Anchor::Page),
+        "char" => (Anchor::Character, Anchor::Paragraph),
+        _ => (Anchor::Column, Anchor::Paragraph),
+    };
+    let mut f = Float { wrap, ..Default::default() };
+    f.h_rel = g.h_rel.as_deref().map_or(h_def, |r| relative_to(r, true));
+    f.v_rel = g.v_rel.as_deref().map_or(v_def, |r| relative_to(r, false));
+    f.x = get(a, "svg:x").and_then(length).filter(|v| v.is_finite()).unwrap_or(0.0).clamp(-1584.0, 1584.0);
+    f.y = get(a, "svg:y").and_then(length).filter(|v| v.is_finite()).unwrap_or(0.0).clamp(-1584.0, 1584.0);
+    f.h_align = match g.h_pos.as_deref() {
+        Some("left") => Some(FloatAlign::Start),
+        Some("center") => Some(FloatAlign::Center),
+        Some("right") => Some(FloatAlign::End),
+        Some("inside") => Some(FloatAlign::Inside),
+        Some("outside") => Some(FloatAlign::Outside),
+        _ => None,
+    };
+    f.v_align = match g.v_pos.as_deref() {
+        Some("top") => Some(FloatAlign::Start),
+        Some("middle") | Some("center") => Some(FloatAlign::Center),
+        Some("bottom") => Some(FloatAlign::End),
+        _ => None,
+    };
+    match g.wrap.as_deref() {
+        Some("none") => f.wrap = Wrap::TopAndBottom,
+        Some("run-through") => f.wrap = if g.background == Some(true) { Wrap::BehindText } else { Wrap::InFrontOfText },
+        Some("left") => (f.wrap, f.wrap_text) = (Wrap::Square, WrapText::Left),
+        Some("right") => (f.wrap, f.wrap_text) = (Wrap::Square, WrapText::Right),
+        Some("biggest") => (f.wrap, f.wrap_text) = (Wrap::Square, WrapText::Largest),
+        Some("parallel") | Some("dynamic") => f.wrap = Wrap::Square,
+        _ => {}
+    }
+    f.z = get(a, "draw:z-index").and_then(|z| z.trim().parse::<u32>().ok()).map_or(0, |z| z.saturating_add(1));
+    f
+}
+
+/// What a `style:horizontal-rel` or `style:vertical-rel` value places an object against.
+fn relative_to(rel: &str, horizontal: bool) -> Anchor {
+    match rel.trim() {
+        "page" => Anchor::Page,
+        "page-content" => Anchor::Margin,
+        "page-start-margin" => Anchor::LeftMargin,
+        "page-end-margin" => Anchor::RightMargin,
+        "char" => Anchor::Character,
+        "line" | "baseline" | "text" => Anchor::Line,
+        _ if horizontal => Anchor::Column,
+        _ => Anchor::Paragraph,
+    }
+}
+
+/// The outline of a custom shape's `draw:type` (ODF 1.3 §19.167), where Word has a preset for it.
+fn custom_shape_kind(t: &str) -> Option<ShapeKind> {
+    Some(match t.trim() {
+        "rectangle" | "flowchart-process" | "frame" => ShapeKind::Rectangle,
+        "round-rectangle" | "round-rect" | "flowchart-alternate-process" => ShapeKind::RoundedRectangle,
+        "ellipse" | "circle" | "flowchart-connector" => ShapeKind::Ellipse,
+        "diamond" | "flowchart-decision" => ShapeKind::Diamond,
+        "isosceles-triangle" | "flowchart-extract" => ShapeKind::Triangle,
+        "right-triangle" => ShapeKind::RightTriangle,
+        "right-arrow" => ShapeKind::Arrow,
+        "left-arrow" => ShapeKind::ArrowLeft,
+        "up-arrow" => ShapeKind::ArrowUp,
+        "down-arrow" => ShapeKind::ArrowDown,
+        "star5" => ShapeKind::Star,
+        "heart" => ShapeKind::Heart,
+        "flowchart-or" => ShapeKind::FlowchartOr,
+        _ => return None,
+    })
+}
+
+/// End each comment in `blocks` whose range never ended (an `office:annotation-end` missing): at
+/// its start, as a comment that marks no text.
+fn close_comments(blocks: &mut [FBlock], open: &[u32]) {
+    for b in blocks {
+        match b {
+            FBlock::Para(p) => {
+                let mut i = 0;
+                while i < p.inlines.len() {
+                    if let Some(Inline::Object(o)) = p.inlines.get(i)
+                        && let InlineObject::CommentStart { id } = o.obj
+                        && open.contains(&id)
+                    {
+                        let end = FObject { obj: InlineObject::CommentEnd { id }, ..(**o).clone() };
+                        p.inlines.insert(i + 1, Inline::Object(Box::new(end)));
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            FBlock::Table(t) => {
+                for row in &mut t.rows {
+                    for c in row {
+                        close_comments(&mut c.blocks, open);
+                    }
+                }
+            }
+        }
     }
 }

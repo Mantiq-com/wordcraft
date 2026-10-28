@@ -1,4 +1,6 @@
-use super::body::Body;
+use wordcraft_doc::{Comment, PartKind};
+
+use super::body::{Body, ReadComment};
 use super::limits::{MAX_ENTRY, MAX_SECTIONS};
 use super::styles::{Styles, column_sep, columns_of};
 use super::xml::{Attrs, Ev, events, get, length, local};
@@ -110,11 +112,11 @@ pub fn parse(bytes: &[u8]) -> Result<Flow, String> {
 
 /// [`parse`], with the last section's properties (the others are on the paragraphs that end them).
 fn parse_full(bytes: &[u8]) -> Result<(Flow, SectionProps), String> {
-    parse_tracked(bytes).map(|(f, last, ..)| (f, last))
+    parse_tracked(bytes).map(|p| (p.flow, p.last))
 }
 
-/// [`parse_full`], plus whether change tracking is on (`None`: the document has no tracked changes).
-fn parse_tracked(bytes: &[u8]) -> Result<(Flow, SectionProps, Option<bool>, Option<String>, page_parts::Parts), String> {
+/// [`parse_full`], with everything else [`import`] puts into the document.
+fn parse_tracked(bytes: &[u8]) -> Result<Parsed, String> {
     let mut z = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("ODT: not a valid package ({e})"))?;
     if let Some(mt) = read_entry(&mut z, "mimetype") {
         let mt = String::from_utf8_lossy(&mt);
@@ -139,8 +141,10 @@ fn parse_tracked(bytes: &[u8]) -> Result<(Flow, SectionProps, Option<bool>, Opti
     };
     let parts = styles_xml.as_deref().map(|x| page_parts::read(x, &styles, &mut pages, &mut fetch)).unwrap_or_default();
     let mut body = Body::new(&styles, &pages, &mut fetch);
+    body.with_notes = true;
     events(&content, |ev| body.feed(ev));
     let mut blocks = body.take_blocks();
+    let comments = std::mem::take(&mut body.comments);
     // An open section with nothing in it (after a column section at the end) isn't one: the
     // section before it ends the document.
     let mut last = body.sec;
@@ -154,23 +158,54 @@ fn parse_tracked(bytes: &[u8]) -> Result<(Flow, SectionProps, Option<bool>, Opti
         blocks.push(FBlock::Para(Para::default()));
     }
     let track = body.track;
-    Ok((Flow { blocks, meta }, last, track, styles.doc_font(), parts))
+    Ok(Parsed { flow: Flow { blocks, meta }, last, track, font: styles.doc_font(), parts, comments })
+}
+
+/// What [`parse_tracked`] reads besides the flow.
+struct Parsed {
+    flow: Flow,
+    /// The last section's properties (the others are on the paragraphs that end them).
+    last: SectionProps,
+    /// Whether change tracking is on (`None`: the document has no tracked changes).
+    track: Option<bool>,
+    font: Option<String>,
+    parts: page_parts::Parts,
+    /// The comments, in the order their marks' ids number them.
+    comments: Vec<ReadComment>,
 }
 
 /// Parse an `.odt` package into a document.
 pub fn import(bytes: &[u8]) -> Result<Document, String> {
     model::begin_import();
-    let (flow, last, track, font, parts) = parse_tracked(bytes)?;
+    let Parsed { flow, last, track, font, parts, comments } = parse_tracked(bytes)?;
     let mut doc = model::to_doc(&flow);
     if font.is_some() {
         doc.styles.default_chr.font = font;
     }
     doc.last_section = last;
     page_parts::add(&mut doc, parts);
+    add_comments(&mut doc, comments);
     if let Some(t) = track {
         doc.settings.track_changes = t;
     }
     Ok(doc)
+}
+
+/// The comments read into `doc`, each under the id its marks in the text carry (its index).
+fn add_comments(doc: &mut Document, comments: Vec<ReadComment>) {
+    for (i, c) in comments.into_iter().enumerate() {
+        let part = model::add_story(doc, PartKind::Comment, &c.blocks);
+        let comment = Comment {
+            author: c.author,
+            initials: c.initials,
+            date: c.date,
+            parent: c.parent.map(|p| p as u32),
+            resolved: c.resolved,
+            part,
+            ..Default::default()
+        };
+        doc.comments.insert(i as u32, comment);
+    }
 }
 
 /// The page setup of each master page in `styles.xml` (ODF 1.3 §16.9), and of the first one,

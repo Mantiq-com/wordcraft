@@ -1,8 +1,8 @@
 //! Headers and footers of the master pages in `styles.xml` (ODF 1.3 §16.10), read with the body
 //! reader (#863).
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use wordcraft_doc::{Document, Part, PartKind};
+use wordcraft_doc::{Block, Document, PartKind};
 
 use super::{Body, Ev, FBlock, Pages, SectionProps, Styles, events, get, model};
 
@@ -145,12 +145,35 @@ pub(super) fn read(xml: &[u8], styles: &Styles, pages: &mut Pages, fetch: &mut d
     out
 }
 
-/// Put the parts [`read`] found into `doc` under the ids its sections name. `doc` comes from
-/// [`model::to_doc`], which adds no parts of its own.
+/// Put the parts [`read`] found into `doc`, and point its sections at them. [`read`] numbered them
+/// 1, 2, … in order, but [`model::to_doc`] may have given those ids to notes and text boxes, so
+/// each gets a free id and the sections are renumbered.
 pub(super) fn add(doc: &mut Document, parts: Parts) {
+    let mut ids = HashMap::new();
     for (i, (kind, blocks)) in parts.parts.into_iter().enumerate() {
         let blocks = model::part_blocks(doc, &blocks);
-        doc.parts.insert(i as u32 + 1, Part { kind, blocks, body: Default::default() });
+        ids.insert(i as u32 + 1, doc.add_part(kind, blocks));
+    }
+    renumber(&mut doc.last_section, &ids);
+    for block in &mut doc.body {
+        if let Block::Para(p) = &**block
+            && p.section.is_some()
+            && let Block::Para(p) = std::sync::Arc::make_mut(block)
+            && let Some(sec) = &mut p.section
+        {
+            renumber(sec, &ids);
+        }
     }
     doc.settings.even_odd_headers |= parts.even_odd;
+}
+
+/// Point the headers and footers of `sec` at the ids `ids` gives the ones [`read`] numbered.
+fn renumber(sec: &mut SectionProps, ids: &HashMap<u32, u32>) {
+    for set in [&mut sec.headers, &mut sec.footers] {
+        for slot in [&mut set.default, &mut set.even, &mut set.first] {
+            if let Some(id) = slot {
+                *slot = ids.get(id).copied();
+            }
+        }
+    }
 }

@@ -1,3 +1,7 @@
+use wordcraft_doc::ListKind;
+use wordcraft_doc::numbering::{Level, LevelSuffix, levels_for};
+use wordcraft_doc::section::NumFormat;
+
 use super::xml::{Attrs, Ev, events, get, length, local};
 use super::{Align, Arc, Columns, Fmt, HashMap, Kind, Rgb, VAlign, model};
 
@@ -66,6 +70,204 @@ struct StyleInfo {
     page_number: Option<Option<u32>>,
     /// `style:columns` of a section style.
     columns: Option<Columns>,
+    /// `style:graphic-properties` of a frame or shape style.
+    graphic: Graphic,
+}
+
+/// How a frame or drawing shape sits and looks (`style:graphic-properties`, ODF 1.3 §17.27): each
+/// field as the style states it, `None` where it doesn't, so a parent style can fill it in.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Graphic {
+    /// `style:wrap`: `none`, `left`, `right`, `parallel`, `dynamic`, `run-through`, `biggest`.
+    pub(super) wrap: Option<String>,
+    /// `style:run-through`: `background` puts a run-through object behind the text.
+    pub(super) background: Option<bool>,
+    pub(super) h_pos: Option<String>,
+    pub(super) h_rel: Option<String>,
+    pub(super) v_pos: Option<String>,
+    pub(super) v_rel: Option<String>,
+    /// Fill: `Some(None)` is `draw:fill="none"`.
+    pub(super) fill: Option<Option<Rgb>>,
+    /// Outline colour and width in points: `Some(None)` is no outline.
+    pub(super) stroke: Option<Option<(Rgb, f32)>>,
+    /// `fo:padding`, points: the room between a frame's border and its text.
+    pub(super) padding: Option<f32>,
+    /// A frame's height is only the least it may have (`fo:min-height`): it grows to its text.
+    pub(super) min_height: Option<bool>,
+    /// `draw:auto-grow-height`: a shape grows to its text.
+    pub(super) auto_grow: Option<bool>,
+    /// `fo:wrap-option`: a shape's text wraps at its edges (`wrap`) or runs on (`no-wrap`).
+    pub(super) wraps_text: Option<bool>,
+}
+
+impl Graphic {
+    fn read(&mut self, a: &Attrs) {
+        let text = |k: &str| get(a, k).map(|v| v.trim().to_string());
+        self.wrap = text("style:wrap").or(self.wrap.take());
+        if let Some(r) = text("style:run-through") {
+            self.background = Some(r == "background");
+        }
+        self.h_pos = text("style:horizontal-pos").or(self.h_pos.take());
+        self.h_rel = text("style:horizontal-rel").or(self.h_rel.take());
+        self.v_pos = text("style:vertical-pos").or(self.v_pos.take());
+        self.v_rel = text("style:vertical-rel").or(self.v_rel.take());
+        match get(a, "draw:fill").map(str::trim) {
+            Some("none") => self.fill = Some(None),
+            Some("solid") => self.fill = Some(get(a, "draw:fill-color").and_then(model::parse_color)),
+            _ => {}
+        }
+        if let Some(c) = get(a, "fo:background-color") {
+            self.fill = Some(model::parse_color(c));
+        }
+        if get(a, "draw:stroke").map(str::trim) == Some("none") {
+            self.stroke = Some(None);
+        } else if let Some(c) = get(a, "svg:stroke-color").and_then(model::parse_color) {
+            let width = get(a, "svg:stroke-width").and_then(length).unwrap_or(0.75);
+            self.stroke = Some(Some((c, width)));
+        }
+        if let Some(b) = get(a, "fo:border") {
+            self.stroke = Some(border_line(b));
+        }
+        if let Some(p) = get(a, "fo:padding").and_then(length).filter(|p| *p >= 0.0) {
+            self.padding = Some(p.min(144.0));
+        }
+        if get(a, "fo:min-height").is_some() {
+            self.min_height = Some(true);
+        }
+        if let Some(g) = get(a, "draw:auto-grow-height") {
+            self.auto_grow = Some(g.trim() == "true");
+        }
+        if let Some(w) = get(a, "fo:wrap-option") {
+            self.wraps_text = Some(w.trim() == "wrap");
+        }
+    }
+
+    /// `self`, with what it leaves unsaid taken from `parent`.
+    fn or(mut self, parent: &Graphic) -> Graphic {
+        self.wrap = self.wrap.or_else(|| parent.wrap.clone());
+        self.background = self.background.or(parent.background);
+        self.h_pos = self.h_pos.or_else(|| parent.h_pos.clone());
+        self.h_rel = self.h_rel.or_else(|| parent.h_rel.clone());
+        self.v_pos = self.v_pos.or_else(|| parent.v_pos.clone());
+        self.v_rel = self.v_rel.or_else(|| parent.v_rel.clone());
+        self.fill = self.fill.or(parent.fill);
+        self.stroke = self.stroke.or(parent.stroke);
+        self.padding = self.padding.or(parent.padding);
+        self.min_height = self.min_height.or(parent.min_height);
+        self.auto_grow = self.auto_grow.or(parent.auto_grow);
+        self.wraps_text = self.wraps_text.or(parent.wraps_text);
+        self
+    }
+}
+
+/// A `text:list-style` being read: whether each level is numbered, and the levels it defines.
+struct ListRead {
+    name: String,
+    ordered: Vec<bool>,
+    levels: Vec<Option<Level>>,
+    /// The level whose properties come next.
+    at: usize,
+}
+
+impl ListRead {
+    fn new(name: &str) -> ListRead {
+        ListRead { name: name.to_string(), ordered: vec![false; 10], levels: vec![None; 10], at: 0 }
+    }
+
+    /// An element of the list style (local name `name`, attributes `a`): a level, or where the
+    /// current level's label sits.
+    fn element(&mut self, name: &str, a: &Attrs) {
+        if name == "list-level-label-alignment" {
+            self.alignment(a);
+        } else {
+            self.level(name, a);
+        }
+    }
+
+    /// A `text:list-level-style-*` element (local name `kind`, attributes `a`).
+    fn level(&mut self, kind: &str, a: &Attrs) {
+        let lv = get(a, "text:level").and_then(|l| l.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 10);
+        if let Some(slot) = self.ordered.get_mut(lv - 1) {
+            *slot = kind == "list-level-style-number" && get(a, "style:num-format").is_some_and(|f| !f.is_empty());
+        }
+        self.at = lv - 1;
+        if let Some(slot) = self.levels.get_mut(self.at) {
+            *slot = Some(list_level(kind, a, lv));
+        }
+    }
+
+    /// Where the current level's label and text sit (ODF 1.3 §17.20): the text's left indent, how
+    /// far left of it the label hangs and what follows the label.
+    fn alignment(&mut self, a: &Attrs) {
+        let Some(Some(level)) = self.levels.get_mut(self.at) else { return };
+        let len = |k: &str| get(a, k).and_then(length).filter(|v| v.is_finite());
+        if let Some(left) = len("fo:margin-left") {
+            level.indent = left.clamp(0.0, 1584.0);
+        }
+        if let Some(first) = len("fo:text-indent") {
+            level.hanging = (-first).clamp(0.0, 1584.0);
+        }
+        level.tab = len("text:list-tab-stop-position").map(|t| t.clamp(0.0, 1584.0));
+        level.suffix = match get(a, "text:label-followed-by").map(str::trim) {
+            Some("space") => LevelSuffix::Space,
+            Some("nothing") => LevelSuffix::Nothing,
+            _ => LevelSuffix::Tab,
+        };
+    }
+
+    /// The levels the style defines, up to its last; the levels it leaves out keep the defaults of
+    /// their kind. `None` when it defines none.
+    fn levels(&self) -> Option<Vec<Level>> {
+        let last = self.levels.iter().rposition(Option::is_some)?;
+        let defaults = levels_for(if self.ordered.first().copied().unwrap_or(false) { ListKind::Numbered } else { ListKind::Bullet });
+        let own = (0..=last.min(8)).map(|i| self.levels.get(i).cloned().flatten().or_else(|| defaults.get(i).cloned()).unwrap_or_default());
+        Some(own.collect())
+    }
+}
+
+/// Level `lv` (1-based) of a list style, from its `text:list-level-style-*` element (local name
+/// `kind`, attributes `a`, ODF 1.3 §16.31–33): a number in its format between its prefix and
+/// suffix, with as many levels above it as it displays (`1.2`), or a bullet.
+fn list_level(kind: &str, a: &Attrs, lv: usize) -> Level {
+    let mut level = Level { indent: 36.0 * lv as f32, hanging: 18.0, ..Level::default() };
+    if kind != "list-level-style-number" {
+        level.format = NumFormat::Bullet;
+        level.text = get(a, "text:bullet-char").and_then(|c| c.chars().next()).unwrap_or('•').to_string();
+        return level;
+    }
+    level.format = match get(a, "style:num-format").map(str::trim) {
+        Some("a") => NumFormat::LowerLetter,
+        Some("A") => NumFormat::UpperLetter,
+        Some("i") => NumFormat::LowerRoman,
+        Some("I") => NumFormat::UpperRoman,
+        Some("") | None => NumFormat::None,
+        _ => NumFormat::Decimal,
+    };
+    let shown = get(a, "text:display-levels").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, lv);
+    let numbers: Vec<String> = (lv + 1 - shown..=lv).map(|n| format!("%{n}")).collect();
+    let cap = |k: &str| get(a, k).unwrap_or("").chars().take(32).collect::<String>();
+    let (prefix, suffix) = (cap("style:num-prefix"), cap("style:num-suffix"));
+    level.text = if level.format == NumFormat::None { format!("{prefix}{suffix}") } else { format!("{prefix}{}{suffix}", numbers.join(".")) };
+    level.start = get(a, "text:start-value").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1).min(32_767);
+    level
+}
+
+/// A border (`0.06pt solid #000000`, ODF 1.3 §20.183) as an outline: its colour and width, or
+/// none for `none` and `hidden`.
+fn border_line(v: &str) -> Option<(Rgb, f32)> {
+    let mut width = 0.75;
+    let mut color = None;
+    for part in v.split_whitespace() {
+        if matches!(part, "none" | "hidden") {
+            return None;
+        }
+        if let Some(c) = model::parse_color(part) {
+            color = Some(c);
+        } else if let Some(w) = length(part) {
+            width = w.clamp(0.0, 20.0);
+        }
+    }
+    Some((color.unwrap_or(Rgb(0, 0, 0)), width))
 }
 
 /// Columns of a `style:columns` element (ODF 1.3 §17.12): count and gap, clamped as the RTF and
@@ -142,6 +344,8 @@ fn text_properties(a: &Attrs, style: &mut StyleInfo) {
 pub(super) struct Styles {
     map: HashMap<String, StyleInfo>,
     pub(super) lists: HashMap<String, Vec<bool>>,
+    /// The levels of each list style: number format, label and indents.
+    pub(super) list_levels: HashMap<String, Arc<Vec<Level>>>,
     /// Font of `style:default-style` for paragraphs (the document default, ODF 1.3 §16.4).
     default_font: Option<String>,
 }
@@ -151,7 +355,7 @@ impl Styles {
         let mut in_auto = false;
         let mut cur: Option<(String, StyleInfo)> = None;
         let mut in_default = false;
-        let mut list: Option<(String, Vec<bool>)> = None;
+        let mut list: Option<ListRead> = None;
         events(xml, |ev| match ev {
             Ev::Start(q, a) => match local(&q) {
                 "automatic-styles" => in_auto = true,
@@ -236,6 +440,11 @@ impl Styles {
                         s.columns = Some(columns_of(&a));
                     }
                 }
+                "graphic-properties" => {
+                    if let Some((_, s)) = &mut cur {
+                        s.graphic.read(&a);
+                    }
+                }
                 "column-sep" => {
                     if let Some((_, s)) = &mut cur
                         && let Some(c) = &mut s.columns
@@ -243,14 +452,10 @@ impl Styles {
                         c.separator = column_sep(&a);
                     }
                 }
-                "list-style" => list = get(&a, "style:name").map(|n| (n.to_string(), vec![false; 10])),
-                "list-level-style-number" | "list-level-style-bullet" | "list-level-style-image" => {
-                    if let Some((_, v)) = &mut list {
-                        let lv = get(&a, "text:level").and_then(|l| l.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 10);
-                        let ordered = local(&q) == "list-level-style-number" && get(&a, "style:num-format").is_some_and(|f| !f.is_empty());
-                        if let Some(slot) = v.get_mut(lv - 1) {
-                            *slot = ordered;
-                        }
+                "list-style" => list = get(&a, "style:name").map(ListRead::new),
+                "list-level-style-number" | "list-level-style-bullet" | "list-level-style-image" | "list-level-label-alignment" => {
+                    if let Some(l) = &mut list {
+                        l.element(local(&q), &a);
                     }
                 }
                 _ => {}
@@ -266,8 +471,8 @@ impl Styles {
                     }
                 }
                 "list-style" => {
-                    if let Some((n, v)) = list.take() {
-                        self.lists.insert(n, v);
+                    if let Some(l) = list.take() {
+                        self.add_list(l);
                     }
                 }
                 _ => {}
@@ -318,6 +523,19 @@ impl Styles {
     /// Columns of a section style (whole chain).
     pub(super) fn columns(&self, name: &str) -> Option<Columns> {
         self.chain(name).iter().find_map(|(_, s)| s.columns.clone())
+    }
+
+    /// A list style read: whether its levels are numbered, and the levels it defines.
+    fn add_list(&mut self, l: ListRead) {
+        if let Some(levels) = l.levels() {
+            self.list_levels.insert(l.name.clone(), Arc::new(levels));
+        }
+        self.lists.insert(l.name, l.ordered);
+    }
+
+    /// Placement and look of a frame or shape style (whole chain).
+    pub(super) fn graphic(&self, name: &str) -> Graphic {
+        self.chain(name).iter().fold(Graphic::default(), |g, (_, s)| g.or(&s.graphic))
     }
 
     /// Width in points of a table-column style (whole chain).

@@ -1,7 +1,10 @@
 use super::from_doc::uses_kind;
+use wordcraft_doc::para::NoteKind;
+use wordcraft_doc::{PartKind, TextBody};
+
 use super::types::{
-    CODE_STYLE, Cell, Dropped, FBlock, FTable, Flow, Fmt, Inline, Kind, ListInfo, MAX_DEPTH, MAX_RUN_STRINGS, MONO_FONT, Para, RUBY_BASE_SIZE,
-    RevMark, clean_text, dropped, ruby_object,
+    CODE_STYLE, Cell, Dropped, FBlock, FObject, FTable, Flow, Fmt, Inline, Kind, ListInfo, MAX_DEPTH, MAX_RUN_STRINGS, MONO_FONT, Para,
+    RUBY_BASE_SIZE, RevMark, clean_text, dropped, ruby_object,
 };
 use super::{
     AbstractNum, Arc, Block, Blocks, Border, BorderStyle, Borders, CellProps, CharProps, Document, InlineObject, Level, ListKind, Num, NumRef, OBJ,
@@ -112,6 +115,11 @@ struct Builder<'a> {
     revs: std::collections::HashMap<(u8, RevMark), u32>,
     /// Link and font bytes given to runs so far ([`MAX_RUN_STRINGS`]).
     run_strings: usize,
+    /// The note whose text is being built: its own mark there points at it.
+    note: Option<(NoteKind, u32)>,
+    /// The paragraph style of the part being built (a note's or a comment's text), for paragraphs
+    /// whose kind gives them none.
+    story_style: Option<&'static str>,
 }
 
 fn rev_key(kind: RevisionKind) -> u8 {
@@ -131,7 +139,52 @@ impl<'a> Builder<'a> {
                 revs.entry((rev_key(r.kind), mark)).or_insert(i as u32);
             }
         }
-        Builder { doc, revs, run_strings: 0 }
+        Builder { doc, revs, run_strings: 0, note: None, story_style: None }
+    }
+
+    /// `blocks` as a new part of `kind` (a note's text when `note` names its kind), with the
+    /// text box settings `body`; the part's id.
+    fn story(&mut self, kind: PartKind, blocks: &[FBlock], body: TextBody, note: Option<NoteKind>) -> u32 {
+        let id = self.doc.add_part(kind, Blocks::new());
+        let saved = (self.note, self.story_style);
+        self.note = note.map(|k| (k, id));
+        self.story_style = match kind {
+            PartKind::Footnote => Some("FootnoteText"),
+            PartKind::Endnote => Some("EndnoteText"),
+            PartKind::Header | PartKind::Footer | PartKind::Comment | PartKind::TextBox => None,
+        };
+        let mut built = self.blocks(blocks, 0);
+        (self.note, self.story_style) = saved;
+        if built.is_empty() {
+            built.push(para_block(Paragraph::new()));
+        }
+        if let Some(part) = self.doc.parts.get_mut(&id) {
+            part.blocks = built;
+            part.body = body;
+        }
+        id
+    }
+
+    /// An [`Inline::Object`] appended to `out`, its text added as a part first.
+    fn object(&mut self, out: &mut Paragraph, o: &FObject) {
+        let mut obj = o.obj.clone();
+        match (&mut obj, &o.story) {
+            (InlineObject::NoteRef { kind, id, .. }, Some((part, blocks))) => *id = self.story(*part, blocks, o.body, Some(*kind)),
+            (InlineObject::Shape { story, .. }, Some((part, blocks))) => *story = Some(self.story(*part, blocks, o.body, None)),
+            // A note's own mark, at the start of its text.
+            (InlineObject::NoteRef { kind, id, .. }, None) => match self.note {
+                Some((k, own)) if k == *kind => *id = own,
+                _ => return,
+            },
+            _ => {}
+        }
+        let mut cp = self.budget(char_props(&o.fmt));
+        if let InlineObject::NoteRef { kind, .. } = &obj {
+            cp.style = Some(if *kind == NoteKind::Endnote { "EndnoteReference" } else { "FootnoteReference" }.into());
+            cp.vert_align = None;
+        }
+        cp.ins = o.fmt.ins.as_ref().map(|m| self.revision(RevisionKind::Insert, m));
+        append(out, "", &cp, Some(obj));
     }
 
     /// The document revision for a tracked change, added the first time it is seen.
@@ -165,13 +218,16 @@ impl<'a> Builder<'a> {
     fn para(&mut self, p: &Para, list_num: Option<u32>) -> Paragraph {
         let mut out = Paragraph::new();
         out.props = para_props(p, list_num);
+        if out.props.style.is_none() {
+            out.props.style = self.story_style.map(str::to_string);
+        }
         if let Some(c) = &p.fmt_change {
             // A list item stays in its list instance (only its level may differ); an old list on a
             // paragraph that is no list now gets an instance of its own, so Reject can restore it.
             // The same goes for an item whose list kind changed (numbered to bulleted or back).
             let old_num = match (c.old.list, p.list, list_num) {
                 (Some(old), Some(now), Some(num)) if old.ordered == now.ordered => Some(num),
-                (Some(old), _, _) => Some(self.new_list(&[old])),
+                (Some(old), _, _) => Some(self.new_list(&[old], c.old.list_levels.as_deref().map(Vec::as_slice))),
                 _ => None,
             };
             let old = para_props(&c.old, old_num);
@@ -239,6 +295,7 @@ impl<'a> Builder<'a> {
                         append(&mut out, "", &cp, Some(obj));
                     }
                 }
+                Inline::Object(o) => self.object(&mut out, o),
             }
         }
         out.mark.ins = p.mark_ins.as_deref().map(|m| self.revision(RevisionKind::Insert, m));
@@ -248,8 +305,14 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// A new list instance whose levels follow the kinds used in `group` (first use per level).
-    fn new_list(&mut self, group: &[ListInfo]) -> u32 {
+    /// A new list instance whose levels follow the kinds used in `group` (first use per level), or
+    /// are `own`, the levels the source defines.
+    fn new_list(&mut self, group: &[ListInfo], own: Option<&[Level]>) -> u32 {
+        if let Some(own) = own.filter(|l| !l.is_empty()) {
+            let defaults = levels_for(ListKind::Numbered);
+            let levels = (0..9).map(|i| own.get(i).or(defaults.get(i)).cloned().unwrap_or_default()).collect();
+            return self.add_list(levels);
+        }
         let num_levels = levels_for(ListKind::Numbered);
         let bul_levels = levels_for(ListKind::Bullet);
         let mut kinds: [Option<bool>; 9] = [None; 9];
@@ -281,6 +344,11 @@ impl<'a> Builder<'a> {
                 level
             })
             .collect();
+        self.add_list(levels)
+    }
+
+    /// A list instance of its own with `levels`.
+    fn add_list(&mut self, levels: Vec<Level>) -> u32 {
         let numbering = &mut self.doc.numbering;
         let aid = numbering.abstracts.iter().map(|a| a.id + 1).max().unwrap_or(0);
         numbering.abstracts.push(AbstractNum { id: aid, name: None, levels, ..Default::default() });
@@ -311,7 +379,7 @@ impl<'a> Builder<'a> {
                         group.push(li);
                         j += 1;
                     }
-                    let num = self.new_list(&group);
+                    let num = self.new_list(&group, p.list_levels.as_deref().map(Vec::as_slice));
                     for q in blocks.get(i..j).unwrap_or(&[]) {
                         if let FBlock::Para(q) = q {
                             let para = self.para(q, Some(num));
@@ -439,4 +507,10 @@ pub fn part_blocks(doc: &mut Document, blocks: &[FBlock]) -> Blocks {
         out.push(para_block(Paragraph::new()));
     }
     out
+}
+
+/// `blocks` as a new part of `kind` in `doc`, its paragraphs in the style that kind's text takes
+/// (a footnote's in Footnote Text); the part's id.
+pub fn add_story(doc: &mut Document, kind: PartKind, blocks: &[FBlock]) -> u32 {
+    Builder::new(doc).story(kind, blocks, TextBody::default(), None)
 }

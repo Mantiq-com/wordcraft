@@ -164,6 +164,32 @@ pub enum Inline {
         ruby: String,
         fmt: Fmt,
     },
+    /// A document object the flow has no form of its own for, from a reader that knows it (ODT):
+    /// a note mark, a comment's start or end, a field, a shape or a text box.
+    Object(Box<FObject>),
+}
+
+/// An [`Inline::Object`]: the object, the formatting of its run and, for a note mark or a shape
+/// with text, that text as flow blocks. [`to_doc`](super::to_doc) adds the text as a part of
+/// its kind and points the object at it: a [`InlineObject::NoteRef`]'s `id`, a
+/// [`InlineObject::Shape`]'s `story`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FObject {
+    pub obj: InlineObject,
+    pub fmt: Fmt,
+    pub story: Option<(wordcraft_doc::PartKind, Vec<FBlock>)>,
+    /// How a text box shows its text (inset, fit to text).
+    pub body: wordcraft_doc::TextBody,
+}
+
+impl FObject {
+    /// The text the object shows in the paragraph: a field's result, nothing for the others.
+    fn shown(&self) -> &str {
+        match &self.obj {
+            InlineObject::Field { result, .. } => result,
+            _ => "",
+        }
+    }
 }
 
 /// Base text size (points) a phonetic guide falls back to when the source states none: the
@@ -226,6 +252,9 @@ pub struct Spacing {
 pub struct Para {
     pub kind: Kind,
     pub list: Option<ListInfo>,
+    /// The levels of the paragraph's list as its source defines them (an ODT list style): number
+    /// format, label and indents. `None` gives the list the default levels of its kind.
+    pub list_levels: Option<Arc<Vec<wordcraft_doc::numbering::Level>>>,
     pub align: Option<Align>,
     pub page_break: bool,
     /// Keep the paragraph on the same page as the next one (ODT `fo:keep-with-next`).
@@ -270,6 +299,7 @@ impl Para {
         for i in &self.inlines {
             match i {
                 Inline::Text(t, _) | Inline::Equation { linear: t, .. } | Inline::Ruby { base: t, .. } => s.push_str(t),
+                Inline::Object(o) => s.push_str(o.shown()),
                 Inline::Image(_) | Inline::Anchor(_) | Inline::Figure(_) => {}
             }
         }
@@ -286,6 +316,7 @@ impl Para {
                     _ => s.push_str(t),
                 },
                 Inline::Equation { linear: t, .. } | Inline::Ruby { base: t, .. } => s.push_str(t),
+                Inline::Object(o) => s.push_str(o.shown()),
                 Inline::Image(_) | Inline::Anchor(_) | Inline::Figure(_) => {}
             }
         }

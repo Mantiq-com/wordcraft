@@ -1,4 +1,7 @@
 use super::*;
+use wordcraft_doc::InlineObject;
+use wordcraft_doc::para::{NoteKind, ShapeKind};
+use wordcraft_doc::section::NumFormat;
 
 #[test]
 fn escaper_drops_noncharacters() {
@@ -1134,4 +1137,200 @@ fn meta_creation_date_timezones_and_fallbacks() {
     let m2 = read_meta(xml_dc_date_fallback);
     assert_eq!(m2.created, "2024-03-05T13:45:00Z");
     assert_eq!(m2.author, "Solo Creator");
+}
+
+/// A document whose body is `body`, after `auto` automatic styles, with `styles.xml` when given.
+fn odt_doc(auto: &str, body: &str, styles: Option<&str>) -> Document {
+    let content = format!(
+        r#"<office:document-content {NS_T}><office:automatic-styles>{auto}</office:automatic-styles><office:body><office:text>{body}</office:text></office:body></office:document-content>"#
+    );
+    import(&package(&content, styles)).unwrap()
+}
+
+/// The body's paragraphs, tables left out.
+fn body_paras(doc: &Document) -> Vec<&wordcraft_doc::Paragraph> {
+    doc.body.iter().filter_map(|b| if let wordcraft_doc::Block::Para(p) = &**b { Some(p) } else { None }).collect()
+}
+
+fn objects(doc: &Document) -> Vec<&wordcraft_doc::InlineObject> {
+    body_paras(doc).into_iter().flat_map(|p| &p.objects).collect()
+}
+
+/// The text of part `id`, a line per paragraph, without its objects.
+fn story_lines(doc: &Document, id: u32) -> String {
+    let part = doc.parts.get(&id).expect("part");
+    let lines: Vec<String> = part
+        .blocks
+        .iter()
+        .filter_map(|b| if let wordcraft_doc::Block::Para(p) = &**b { Some(p.text.replace(wordcraft_doc::para::OBJ, "")) } else { None })
+        .collect();
+    lines.join("\n")
+}
+
+/// The text of `p` between the objects `start` and `end`.
+fn between(p: &wordcraft_doc::Paragraph, start: &wordcraft_doc::InlineObject, end: &wordcraft_doc::InlineObject) -> Option<String> {
+    let mut k = 0;
+    let (mut inside, mut out, mut seen_end) = (false, String::new(), false);
+    for c in p.text.chars() {
+        if c == wordcraft_doc::para::OBJ {
+            let o = p.objects.get(k);
+            k += 1;
+            if o == Some(start) {
+                inside = true;
+            } else if o == Some(end) && inside {
+                seen_end = true;
+                break;
+            }
+        } else if inside {
+            out.push(c);
+        }
+    }
+    seen_end.then_some(out)
+}
+
+#[test]
+fn notes_keep_their_text_and_kind_and_leave_the_body_text_alone() {
+    let doc = odt_doc(
+        "",
+        r#"<text:p>Price<text:note text:id="n1" text:note-class="footnote"><text:note-citation>1</text:note-citation><text:note-body><text:p>Excluding tax.</text:p><text:p>Paid yearly.</text:p></text:note-body></text:note> due<text:note text:id="n2" text:note-class="endnote"><text:note-citation text:label="*">*</text:note-citation><text:note-body><text:p>In writing.</text:p></text:note-body></text:note>.</text:p>"#,
+        None,
+    );
+    let p = body_paras(&doc)[0];
+    assert_eq!(p.text.replace(wordcraft_doc::para::OBJ, ""), "Price due.");
+    let notes: Vec<(NoteKind, u32, &str)> = objects(&doc)
+        .into_iter()
+        .filter_map(|o| if let InlineObject::NoteRef { kind, id, custom } = o { Some((*kind, *id, custom.as_str())) } else { None })
+        .collect();
+    let [(NoteKind::Footnote, foot, ""), (NoteKind::Endnote, end, "*")] = notes[..] else { panic!("notes: {notes:?}") };
+    assert_eq!(doc.parts[&foot].kind, wordcraft_doc::PartKind::Footnote);
+    assert_eq!(story_lines(&doc, foot), "Excluding tax.\nPaid yearly.");
+    assert_eq!(doc.parts[&end].kind, wordcraft_doc::PartKind::Endnote);
+    assert_eq!(story_lines(&doc, end), "In writing.");
+    // The note's text starts with its own mark, which the DOCX writer turns into its number.
+    let wordcraft_doc::Block::Para(first) = &*doc.parts[&foot].blocks[0] else { panic!("note paragraph") };
+    assert!(matches!(first.objects.first(), Some(InlineObject::NoteRef { id, .. }) if *id == foot));
+}
+
+#[test]
+fn comments_keep_their_author_range_replies_and_state() {
+    let doc = odt_doc(
+        "",
+        r#"<text:p>Pay <office:annotation office:name="a1"><dc:creator>Alice Smith</dc:creator><dc:date>2026-10-01T10:00:00</dc:date><meta:creator-initials>AS</meta:creator-initials><text:p>Confirm the amount.</text:p></office:annotation>the price<office:annotation-end office:name="a1"/><office:annotation office:name="a2" loext:parent-name="a1"><dc:creator>Bob Jones</dc:creator><text:p>Confirmed.</text:p></office:annotation> now.<office:annotation loext:resolved="true"><dc:creator>Bob Jones</dc:creator><text:p>A point.</text:p></office:annotation></text:p>"#,
+        None,
+    );
+    assert_eq!(doc.comments.len(), 3);
+    let (first, reply, point) = (&doc.comments[&0], &doc.comments[&1], &doc.comments[&2]);
+    assert_eq!((first.author.as_str(), first.initials.as_str(), first.date.as_str()), ("Alice Smith", "AS", "2026-10-01T10:00:00"));
+    assert_eq!(story_lines(&doc, first.part), "Confirm the amount.");
+    assert_eq!(reply.parent, Some(0));
+    assert_eq!(story_lines(&doc, reply.part), "Confirmed.");
+    assert!(point.resolved && !first.resolved);
+    let p = body_paras(&doc)[0];
+    assert_eq!(p.text.replace(wordcraft_doc::para::OBJ, ""), "Pay the price now.");
+    let range = |id| between(p, &InlineObject::CommentStart { id }, &InlineObject::CommentEnd { id });
+    assert_eq!(range(0).as_deref(), Some("the price"));
+    // A reply marks no text of its own; a comment without a name marks no text at all.
+    assert!(!p.objects.contains(&InlineObject::CommentStart { id: 1 }));
+    assert_eq!(range(2).as_deref(), Some(""));
+}
+
+#[test]
+fn a_comment_whose_range_never_ends_ends_where_it_starts() {
+    let doc = odt_doc(
+        "",
+        r#"<text:p>One <office:annotation office:name="lost"><dc:creator>A</dc:creator><text:p>Note.</text:p></office:annotation>two.</text:p>"#,
+        None,
+    );
+    let p = body_paras(&doc)[0];
+    assert_eq!(between(p, &InlineObject::CommentStart { id: 0 }, &InlineObject::CommentEnd { id: 0 }).as_deref(), Some(""));
+}
+
+#[test]
+fn text_frames_become_text_boxes_floating_or_in_line_as_anchored() {
+    let auto = r#"<style:style style:name="fr" style:family="graphic"><style:graphic-properties style:wrap="none" fo:min-height="0cm" fo:border="0.5pt solid #ff0000"/></style:style>"#;
+    let doc = odt_doc(
+        auto,
+        r#"<text:p><draw:frame draw:style-name="fr" text:anchor-type="paragraph" svg:x="1in" svg:width="2in" svg:height="0.25in"><draw:text-box><text:p>Draft only</text:p></draw:text-box></draw:frame>Body text <draw:frame text:anchor-type="as-char" svg:width="1in" svg:height="0.25in"><draw:text-box><text:p>Initials</text:p></draw:text-box></draw:frame>.</text:p>"#,
+        None,
+    );
+    assert_eq!(body_paras(&doc)[0].text.replace(wordcraft_doc::para::OBJ, ""), "Body text .");
+    let boxes: Vec<_> = objects(&doc)
+        .into_iter()
+        .filter_map(|o| {
+            if let InlineObject::Shape { kind: ShapeKind::TextBox, story: Some(s), float, stroke, w, .. } = o {
+                Some((*s, float, *stroke, *w))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let [(draft, floating, stroke, w), (initials, in_line, _, _)] = boxes[..] else { panic!("boxes: {}", boxes.len()) };
+    assert_eq!(story_lines(&doc, draft), "Draft only");
+    assert_eq!(doc.parts[&draft].kind, wordcraft_doc::PartKind::TextBox);
+    assert_eq!((floating.wrap, floating.x, w), (wordcraft_doc::para::Wrap::TopAndBottom, 72.0, 144.0));
+    assert_eq!(stroke, Some(Rgb(0xff, 0, 0)));
+    // The style's least height lets the box grow to its text.
+    assert!(doc.parts[&draft].body.auto_fit);
+    assert_eq!(story_lines(&doc, initials), "Initials");
+    assert_eq!(in_line.wrap, wordcraft_doc::para::Wrap::Inline);
+}
+
+#[test]
+fn drawing_shapes_keep_their_outline_and_their_text() {
+    let doc = odt_doc(
+        "",
+        r#"<text:p><draw:custom-shape text:anchor-type="paragraph" svg:width="1in" svg:height="0.5in"><text:p>Seal</text:p><draw:enhanced-geometry draw:type="ellipse"/></draw:custom-shape><draw:custom-shape text:anchor-type="paragraph" svg:width="1in" svg:height="0.5in"><text:p>Odd</text:p><draw:enhanced-geometry draw:type="mso-spt100"/></draw:custom-shape><draw:line text:anchor-type="paragraph" svg:x1="0in" svg:y1="1in" svg:x2="2in" svg:y2="1in"/>Text.</text:p>"#,
+        None,
+    );
+    let shapes: Vec<_> = objects(&doc)
+        .into_iter()
+        .filter_map(|o| if let InlineObject::Shape { kind, story, fill, w, .. } = o { Some((*kind, *story, fill.is_some(), *w)) } else { None })
+        .collect();
+    let [(ShapeKind::Ellipse, Some(seal), true, _), (ShapeKind::TextBox, Some(odd), false, _), (ShapeKind::Line, None, false, line_w)] = shapes[..]
+    else {
+        panic!("shapes: {shapes:?}")
+    };
+    assert_eq!(story_lines(&doc, seal), "Seal");
+    // A geometry without a Word preset keeps its text, in a box without outline or fill.
+    assert_eq!(story_lines(&doc, odd), "Odd");
+    assert_eq!(line_w, 144.0);
+}
+
+#[test]
+fn page_fields_stay_fields_and_footers_keep_parts_of_their_own() {
+    let styles = format!(
+        r#"<office:document-styles {NS_T}><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="21cm" fo:page-height="29.7cm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1"><style:footer><text:p>Page <text:page-number text:select-page="current">1</text:page-number> of <text:page-count>2</text:page-count></text:p></style:footer></style:master-page></office:master-styles></office:document-styles>"#
+    );
+    // The footnote's text takes a part before the footer's is added.
+    let doc = odt_doc(
+        "",
+        r#"<text:p>Text<text:note text:note-class="footnote"><text:note-citation>1</text:note-citation><text:note-body><text:p>Note.</text:p></text:note-body></text:note></text:p>"#,
+        Some(&styles),
+    );
+    let footer = doc.last_section.footers.default.expect("footer");
+    assert_eq!(doc.parts[&footer].kind, wordcraft_doc::PartKind::Footer);
+    let wordcraft_doc::Block::Para(p) = &*doc.parts[&footer].blocks[0] else { panic!("footer paragraph") };
+    let fields: Vec<(&str, &str)> = p
+        .objects
+        .iter()
+        .filter_map(|o| if let InlineObject::Field { instr, result, .. } = o { Some((instr.as_str(), result.as_str())) } else { None })
+        .collect();
+    assert_eq!(fields, [("PAGE", "1"), ("NUMPAGES", "2")]);
+    let Some(InlineObject::NoteRef { id, .. }) = objects(&doc).into_iter().next() else { panic!("note") };
+    assert_eq!(doc.parts[id].kind, wordcraft_doc::PartKind::Footnote);
+}
+
+#[test]
+fn list_styles_keep_their_number_format_and_label() {
+    let auto = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="a" style:num-prefix="(" style:num-suffix=")" text:start-value="2"/><text:list-level-style-number text:level="2" style:num-format="i" style:num-prefix="(" style:num-suffix=")"/></text:list-style>"#;
+    let doc = odt_doc(
+        auto,
+        r#"<text:list text:style-name="L1"><text:list-item><text:p>First</text:p><text:list><text:list-item><text:p>Nested</text:p></text:list-item></text:list></text:list-item></text:list>"#,
+        None,
+    );
+    let num = body_paras(&doc)[0].props.numbering.expect("numbering").num;
+    let abs = doc.numbering.nums.iter().find(|n| n.id == num).expect("num").abstract_id;
+    let levels = &doc.numbering.abstracts.iter().find(|a| a.id == abs).expect("abstract").levels;
+    let shown: Vec<(NumFormat, &str, u32)> = levels.iter().take(2).map(|l| (l.format, l.text.as_str(), l.start)).collect();
+    assert_eq!(shown, [(NumFormat::LowerLetter, "(%1)", 2), (NumFormat::LowerRoman, "(%2)", 1)]);
 }

@@ -15,3 +15,10 @@ pub(super) const MAX_OPEN_INSERTIONS: usize = 64;
 
 /// Longest change author or date kept, in characters.
 pub(super) const MAX_INFO_CHARS: usize = 256;
+
+/// Most comments read from one document; later ones are left out.
+pub(super) const MAX_COMMENTS: usize = 10_000;
+
+/// Most notes, comments, text boxes and shapes open inside one another (a text box in a shape's
+/// text…); one nested deeper is left out.
+pub(super) const MAX_STORY_DEPTH: usize = 8;
