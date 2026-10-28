@@ -245,7 +245,7 @@ impl WordApp {
         // change live (winit reports it and repaints, #311). Where winit is silent (Linux) the
         // desktop portal's answer fills in instead. The interface follows the Interface theme
         // setting alone; Dark page only changes how pages are drawn (#312).
-        let effective = match self.ui.theme {
+        let effective = match theme::host_appearance().unwrap_or(self.ui.theme) {
             theme::Appearance::System if ctx.system_theme().is_none() => match self.desktop_dark {
                 Some(true) => theme::Appearance::Dark,
                 Some(false) => theme::Appearance::Light,

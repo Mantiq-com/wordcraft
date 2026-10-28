@@ -26,6 +26,14 @@
 //!
 //! Only the parent window on the page's own origin is heard or answered. In host mode the parent
 //! guards leaving the page, and `?author=` names the user for comments and tracked changes.
+//!
+//! A parent dresses the editor in its own look with `engine.execute` and the `ui.hostTheme`
+//! command: `{"light"?: {token: "#rrggbb"}, "dark"?: {..}, "radius"?: 0-16, "appearance"?:
+//! "light|dark|system", "community"?: bool, "share"?: bool, "hideTabs"?: [tab], "font"?: base64,
+//! "fontMedium"?: base64, "fontSemibold"?: base64}`. The tokens are those of
+//! `wordcraft_ui_egui::theme::Tokens` in camel case; an accent alone also tints the selection,
+//! checked buttons and the text on it. The look lasts for the visit and is never saved with the
+//! preferences; `{}` returns to WordCraft's own.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
