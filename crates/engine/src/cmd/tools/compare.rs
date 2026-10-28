@@ -1,7 +1,7 @@
 use super::*;
 
 /// Compare and Combine take the same settings.
-pub(super) const COMPARE_PARAMS: &str = r#"{"path"?: string (revised document), "text"?: string (revised text), "original"?: string (original document; default: this one), "author"?: string (label changes with), "caseChanges"?: bool, "whiteSpace"?: bool, "formatting"?: bool (default true: differences count), "level"?: "word|character", "showIn"?: "original|revised|new" (revised/new: an untitled document), "moves"|"comments"|"tables"|"headersFooters"|"footnotes"|"textBoxes"|"fields"?: bool (accepted; not honoured yet except tables, always compared)}"#;
+pub(super) const COMPARE_PARAMS: &str = r#"{"path"?: string (revised document), "data"?: base64 (the revised document's bytes; `path` then only names it), "text"?: string (revised text), "original"?: string (original document; default: this one), "originalData"?: base64 (the original document's bytes; `original` then only names it), "author"?: string (label changes with), "caseChanges"?: bool, "whiteSpace"?: bool, "formatting"?: bool (default true: differences count), "level"?: "word|character", "showIn"?: "original|revised|new" (revised/new: an untitled document), "moves"|"comments"|"tables"|"headersFooters"|"footnotes"|"textBoxes"|"fields"?: bool (accepted; not honoured yet except tables, always compared)}"#;
 
 /// What Compare / Combine compares (the More >> settings of Word's dialog).
 struct CompareOptions {
@@ -35,7 +35,7 @@ pub(super) fn compare(s: &mut Session, v: &Value) -> CmdResult {
     let revised = if let Some(t) = p::str(v, "text") {
         Document::from_text(t)
     } else if let Some(path) = p::str(v, "path") {
-        crate::io::open_path(std::path::Path::new(path)).map_err(CmdError::Failed)?
+        open_compared(path, p::str(v, "data"))?
     } else {
         return Err(CmdError::Params("`path` or `text` of the revised document is required".into()));
     };
@@ -44,7 +44,7 @@ pub(super) fn compare(s: &mut Session, v: &Value) -> CmdResult {
         return Err(CmdError::Params("`showIn` is \"original\", \"revised\" or \"new\"".into()));
     }
     if let Some(path) = p::str(v, "original") {
-        let doc = crate::io::open_path(std::path::Path::new(path)).map_err(CmdError::Failed)?;
+        let doc = open_compared(path, p::str(v, "originalData"))?;
         s.doc = doc;
         s.doc.ensure_nonempty();
         s.note_body_replaced();
@@ -142,6 +142,18 @@ pub(super) fn compare(s: &mut Session, v: &Value) -> CmdResult {
     }
     s.sel = Selection::caret(s.doc.start_of(StoryRef::Body));
     Ok(json!({"changes": changes, "author": author, "notHonoured": not_honoured}))
+}
+
+/// A document taking part in a comparison: read from `path`, or from `data` (base64) when given,
+/// with `path` then only naming it, so a page without a file system can compare too.
+fn open_compared(path: &str, data: Option<&str>) -> Result<Document, CmdError> {
+    match data {
+        Some(data) => {
+            let bytes = crate::cmd::insert::base64_decode(data).ok_or_else(|| CmdError::Params("bad base64".into()))?;
+            crate::io::open_bytes(path, &bytes).map_err(CmdError::Failed)
+        }
+        None => crate::io::open_path(std::path::Path::new(path)).map_err(CmdError::Failed),
+    }
 }
 
 /// A block's text (a table's cells in order), for matching blocks.
