@@ -85,6 +85,20 @@ fn methods_address_an_open_document_by_id() {
     assert_eq!(r["result"]["blocks"][0]["text"], "First more", "{r}");
 }
 
+/// An invalid `author` leaves the document open, even with a forced close.
+#[test]
+fn an_invalid_author_does_not_close_an_addressed_document() {
+    let mut a = app();
+    let (first, second) = two_documents(&mut a);
+
+    let r = send(&mut a, "engine.execute", json!({"command": "file.close", "params": {"force": true}, "doc": first, "author": 7}));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(a.session.is_open(first));
+    assert_eq!(a.session.document_id(), second);
+    let r = send(&mut a, "document.inspect", json!({"doc": first}));
+    assert_eq!(r["result"]["blocks"][0]["text"], "First", "the unsaved text is still there: {r}");
+}
+
 /// W1: `file.close` addressed to a document in the background refuses its unsaved changes
 /// unless forced (only a boolean true), as it does for the window's document (#1268), and closes
 /// only that document.

@@ -147,6 +147,10 @@ fn handle_in(app: &mut WordApp, doc: u64, method: &str, p: &Value) -> Outcome {
             if id.starts_with("ui.") {
                 return err(format!("`{id}` works on the window: make the document active first (view.switchWindows {{\"id\": {doc}}})"));
             }
+            let author = match wordcraft_engine::Session::request_author(p) {
+                Ok(author) => author,
+                Err(e) => return err(e),
+            };
             // Close, with the same guard as the window's: unsaved changes need `force`.
             if id == "file.close" {
                 let force = params.get("force").and_then(Value::as_bool) == Some(true);
@@ -158,10 +162,6 @@ fn handle_in(app: &mut WordApp, doc: u64, method: &str, p: &Value) -> Outcome {
                     Err(e) => err(e),
                 };
             }
-            let author = match wordcraft_engine::Session::request_author(p) {
-                Ok(author) => author,
-                Err(e) => return err(e),
-            };
             let r = app.session.with_document(doc, |s| s.as_author(author, |s| s.run(id, &params)));
             // UI requests the command made carry `document`, so the window can tell they aren't
             // about the document it shows.
