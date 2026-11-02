@@ -24,6 +24,8 @@
 //!   request is. `wordcraft:response` (to the parent) answers it: `{ id, reply }`, where `reply`
 //!   is the protocol's `{ ok, result }` or `{ ok: false, error }`.
 //!
+//! Files and requests take effect in the order the parent sent them.
+//!
 //! Only the parent window on the page's own origin is heard or answered. In host mode the parent
 //! guards leaving the page, and `?author=` names the user for comments and tracked changes.
 
@@ -33,7 +35,7 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
-use wordcraft_ui_egui::{Inbox, Services, WordApp};
+use wordcraft_ui_egui::{Services, WordApp};
 
 /// The longest user name taken from `?author=`.
 const MAX_AUTHOR_CHARS: usize = 200;
@@ -42,8 +44,14 @@ const MAX_AUTHOR_CHARS: usize = 200;
 /// the window's input, screenshots or quitting.
 pub const HOST_METHODS: &[&str] = &["engine.execute", "engine.commands", "document.inspect", "ui.inspect"];
 
-/// A host request waiting for the next frame: its id, method and parameters.
-pub type Requests = Rc<RefCell<Vec<(JsValue, String, serde_json::Value)>>>;
+/// A file or request from the host page, waiting for the next frame.
+pub enum HostMessage {
+    Open { name: String, bytes: Vec<u8> },
+    Request { id: JsValue, method: String, params: serde_json::Value },
+}
+
+/// The host page's messages in the order it sent them.
+pub type HostMessages = Rc<RefCell<Vec<HostMessage>>>;
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -76,8 +84,8 @@ impl Bridge {
 
     /// Hand saved and exported files to the parent instead of downloading them, report unsaved
     /// changes to it, and hear the files it sends.
-    pub fn connect(&self, services: &mut Services, inbox: Inbox, requests: Requests, ctx: egui::Context) {
-        self.listen(inbox, requests, ctx);
+    pub fn connect(&self, services: &mut Services, messages: HostMessages, ctx: egui::Context) {
+        self.listen(messages, ctx);
         let bridge = self.clone();
         services.host_save = Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool| bridge.post_save(name, bytes, save_as)));
         // Anything else that would download goes to the parent too.
@@ -132,9 +140,9 @@ impl Bridge {
         self.send(&[("type", "wordcraft:response".into()), ("id", id.clone()), ("reply", reply)]);
     }
 
-    /// Hear `wordcraft:open` from the parent and queue the file like a dropped one, and queue
-    /// `wordcraft:request` for the next frame, which runs it on the app.
-    fn listen(&self, inbox: Inbox, requests: Requests, ctx: egui::Context) {
+    /// Hear `wordcraft:open` and `wordcraft:request` from the parent and queue them for the next
+    /// frame, which opens the files and runs the requests in the order they arrived.
+    fn listen(&self, messages: HostMessages, ctx: egui::Context) {
         let parent = self.parent.clone();
         let origin = self.origin.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
@@ -151,7 +159,7 @@ impl Bridge {
                     .and_then(|s| s.as_string())
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or(serde_json::Value::Null);
-                requests.borrow_mut().push((id, method, params));
+                messages.borrow_mut().push(HostMessage::Request { id, method, params });
                 ctx.request_repaint();
                 return;
             }
@@ -160,7 +168,7 @@ impl Bridge {
             }
             let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Document.docx".to_string());
             let Some(bytes) = bytes(&data) else { return };
-            inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
+            messages.borrow_mut().push(HostMessage::Open { name, bytes });
             ctx.request_repaint();
         });
         if self.window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_ok() {

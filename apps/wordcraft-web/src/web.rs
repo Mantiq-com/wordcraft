@@ -69,9 +69,9 @@ pub fn start() {
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
-                    let requests = crate::host::Requests::default();
+                    let host_messages = crate::host::HostMessages::default();
                     if let Some(bridge) = &app_bridge {
-                        bridge.connect(&mut services, inbox.clone(), requests.clone(), cc.egui_ctx.clone());
+                        bridge.connect(&mut services, host_messages.clone(), cc.egui_ctx.clone());
                     }
                     let mut app = WordApp::new(session, services);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
@@ -100,7 +100,7 @@ pub fn start() {
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs, bridge: app_bridge.clone(), requests }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, bridge: app_bridge.clone(), host_messages }))
                 }),
             )
             .await;
@@ -135,9 +135,9 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
-    /// The host page in `?host=parent` mode, and its requests waiting for this frame.
+    /// The host page in `?host=parent` mode, and its files and requests waiting for this frame.
     bridge: Option<crate::host::Bridge>,
-    requests: crate::host::Requests,
+    host_messages: crate::host::HostMessages,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -158,12 +158,20 @@ impl eframe::App for WebShell {
         for msg in msgs {
             self.app.status(msg);
         }
-        // The host's requests run between frames, as the desktop app's control channel does.
-        let requests = std::mem::take(&mut *self.requests.borrow_mut());
-        if !requests.is_empty()
+        // The host's files and requests run between frames, as the desktop app's control channel does.
+        let host_messages = std::mem::take(&mut *self.host_messages.borrow_mut());
+        if !host_messages.is_empty()
             && let Some(bridge) = &self.bridge
         {
-            for (id, method, params) in requests {
+            for message in host_messages {
+                let (id, method, params) = match message {
+                    crate::host::HostMessage::Open { name, bytes } => {
+                        self.inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
+                        self.app.drain_inbox();
+                        continue;
+                    }
+                    crate::host::HostMessage::Request { id, method, params } => (id, method, params),
+                };
                 let reply = if crate::host::HOST_METHODS.contains(&method.as_str()) {
                     let (request, _) = wordcraft_ui_egui::ControlRequest::new(method, params);
                     match wordcraft_ui_egui::control::handle(&mut self.app, ctx, &request) {
