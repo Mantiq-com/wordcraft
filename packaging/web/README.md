@@ -181,29 +181,41 @@ Its fields are `{"light"?: {token: "#rrggbb"}, "dark"?: {..}, "radius"?: 0-16, "
 
 ## Fork source and remaining extensions
 
-This fork incorporates upstream [WordCraft v0.18.1](https://github.com/storytold/wordcraft/releases/tag/v0.18.1),
-commit [`079f478bd85df7bcc567e3bafa7d7219096f9c3c`](https://github.com/storytold/wordcraft/commit/079f478bd85df7bcc567e3bafa7d7219096f9c3c),
-and retains three extensions for embedded editing:
+This fork incorporates upstream `main` at
+[`bc0e51ee4db1f23940ac30fc626da02c09541adc`](https://github.com/storytold/wordcraft/commit/bc0e51ee4db1f23940ac30fc626da02c09541adc),
+including changes after [WordCraft v0.18.1](https://github.com/storytold/wordcraft/releases/tag/v0.18.1).
+It retains three extensions for embedded editing:
 
 | Extension | Why it remains | Requirement for removal |
 |---|---|---|
-| Per-command `author` on `engine.execute` | The upstream [control handler](https://github.com/storytold/wordcraft/blob/079f478bd85df7bcc567e3bafa7d7219096f9c3c/crates/ui-egui/src/control/handler.rs) executes with the session's author. `file.setAuthor` changes that shared setting. | An upstream command must sign its comments and tracked changes with the requested author, then restore the session's author and initials on success or error, including commands addressed to another document. |
-| `data` and `originalData` on `review.compare` and `review.combine` | The upstream [comparison loader](https://github.com/storytold/wordcraft/blob/079f478bd85df7bcc567e3bafa7d7219096f9c3c/crates/engine/src/cmd/tools/compare.rs) opens document paths. Browser hosts hold document bytes without a filesystem. | Both documents must be accepted as bytes with format-identifying names, preserving comparison options and tracked changes through save and reopen. |
-| `ui.hostTheme` | The upstream [UI commands](https://github.com/storytold/wordcraft/blob/079f478bd85df7bcc567e3bafa7d7219096f9c3c/crates/ui-egui/src/app/commands.rs) select WordCraft's appearance but do not accept a host palette or interface fonts. | Upstream must provide the host colours, fonts, radius, appearance, button visibility and hidden ribbon tabs described above, without saving them to preferences; resetting the theme must restore WordCraft's defaults. |
+| Per-command `author` on `engine.execute` | The upstream [control handler](https://github.com/storytold/wordcraft/blob/bc0e51ee4db1f23940ac30fc626da02c09541adc/crates/ui-egui/src/control/handler.rs) executes with the session's author. `file.setAuthor` changes that shared setting. | An upstream command must sign its comments and tracked changes with the requested author, then restore the session's author and initials on success or error, including commands addressed to another document. |
+| `data` and `originalData` on `review.compare` and `review.combine` | The upstream [comparison loader](https://github.com/storytold/wordcraft/blob/bc0e51ee4db1f23940ac30fc626da02c09541adc/crates/engine/src/cmd/tools/compare.rs) opens document paths. Browser hosts hold document bytes without a filesystem. | Both documents must be accepted as bytes with format-identifying names, preserving comparison options and tracked changes through save and reopen. |
+| `ui.hostTheme` | The upstream [UI commands](https://github.com/storytold/wordcraft/blob/bc0e51ee4db1f23940ac30fc626da02c09541adc/crates/ui-egui/src/app/commands.rs) select WordCraft's appearance but do not accept a host palette or interface fonts. | Upstream must provide the host colours, fonts, radius, appearance, button visibility and hidden ribbon tabs described above, without saving them to preferences; resetting the theme must restore WordCraft's defaults. |
 
 Retiring an extension requires the upstream web bundle to pass its embedding checks, including
 open, edit, save and reopen, as well as the behaviour in the table. A source comparison or a
 successful build alone does not establish that compatibility. Before releasing a fork update,
 run the repository's full `cargo xtask ci` gate and qualify the resulting web bundle.
 
-The native gate on v0.18.1 passes formatting and Clippy with Rust 1.99.1 and nextest
-0.9.150, using the release's pinned font and language inputs. Two navigation tests
-fail in both this fork and the unmodified upstream release:
+The native `cargo xtask ci` run on fork commit
+[`2e2dae6c688dc63fa6ea474c3756f0724b2e6128`](https://github.com/Mantiq-com/wordcraft/commit/2e2dae6c688dc63fa6ea474c3756f0724b2e6128)
+passed formatting and Clippy, then stopped at six `fit_one_page` test failures:
+1,808 tests passed and nine were skipped. Nextest stopped before running another
+3,169 tests. The later gate stages did not run. All six failures also occur on
+the unmodified upstream commit above with the same toolchain and pinned inputs.
+Its `cargo xtask test` run reached five of them before stopping; a separate run
+of `fit_one_page_bounds_fine_step_loop` reproduced the sixth. The assertions
+remain unchanged.
+
+Historical results from the earlier v0.18.1-based fork do not qualify this source.
+That native gate passed formatting and Clippy with Rust 1.99.1 and nextest 0.9.150,
+using the release's pinned font and language inputs. Two navigation tests failed
+in both that fork and the unmodified upstream release:
 `page_down_and_up_move_by_a_page_in_the_continuous_views` reaches paragraph 24 in
 Draft instead of paragraph 25 in Print Layout, and
 `page_down_and_up_never_stay_on_a_line_in_the_continuous_views` stops moving on its
-third Page Up. These assertions remain unchanged. The gate stops at those failures,
-so the later gate stages and release qualification are still required.
+third Page Up. Those assertions remained unchanged, and that gate stopped at those
+failures. The current source still needs a complete gate and web bundle qualification.
 
 ## Renderer selection and fallback flags
 
