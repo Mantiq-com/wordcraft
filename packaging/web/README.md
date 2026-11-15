@@ -207,6 +207,22 @@ Its `cargo xtask test` run reached five of them before stopping; a separate run
 of `fit_one_page_bounds_fine_step_loop` reproduced the sixth. The assertions
 remain unchanged.
 
+The release web build passes hosted DOCX creation, editing, Save As and reopening.
+Comments and tracked insertions retain their requested authors in the saved XML;
+an unsuccessful command restores the session author. Comparison accepts both DOCX
+inputs as bytes and preserves the changes after saving and reopening. Host theme
+apply/reset and PDF export pass. The published `host-theme-3` bundle opens these
+reviewed and compared documents, and a document it saves reopens in this build.
+Messages from another origin or source are ignored, and disposing the bridge
+unloads the frame. These synthetic checks do not qualify authenticated storage
+or permissions in a consuming application.
+
+The per-command author also affects document protection: an insertion refused
+for the session author succeeds when the request names the author assigned to a
+protected range. This occurs in both this build and `host-theme-3` and remains
+unresolved. The command API therefore requires a trusted caller; authorship
+metadata must not be treated as independent of document-protection checks.
+
 Historical results from the earlier v0.18.1-based fork do not qualify this source.
 That native gate passed formatting and Clippy with Rust 1.99.1 and nextest 0.9.150,
 using the release's pinned font and language inputs. Two navigation tests failed
@@ -215,7 +231,7 @@ in both that fork and the unmodified upstream release:
 Draft instead of paragraph 25 in Print Layout, and
 `page_down_and_up_never_stay_on_a_line_in_the_continuous_views` stops moving on its
 third Page Up. Those assertions remained unchanged, and that gate stopped at those
-failures. The current source still needs a complete gate and web bundle qualification.
+failures. The current source still needs a complete gate and application qualification.
 
 ## Renderer selection and fallback flags
 
