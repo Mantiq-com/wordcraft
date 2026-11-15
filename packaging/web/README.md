@@ -171,6 +171,40 @@ const { data } = await wordcraft.screenshot();            // the canvas as PNG (
 
 The API is there in every mode, with or without a host. Opening a file, handing a saved or exported file to the page, the file name and the unsaved flag stay with the host messages above.
 
+An embedding page gives the editor its own look with the `ui.hostTheme` command:
+
+```js
+await wordcraft.execute("ui.hostTheme", { light: { accent: "#885f1a" }, radius: 8, share: false });
+```
+
+Its fields are `{"light"?: {token: "#rrggbb"}, "dark"?: {..}, "radius"?: 0-16, "appearance"?: "light|dark|system", "community"?: bool, "share"?: bool, "hideTabs"?: [tab], "font"?: base64, "fontMedium"?: base64, "fontSemibold"?: base64}`. The tokens are those of `wordcraft_ui_egui::theme::Tokens` in camel case; an accent alone also tints the selection, checked buttons and the text on it. `community` and `share` say whether the community button and the Share button show, `hideTabs` names ribbon tabs to hide, and the fonts are the regular, medium and semibold interface faces as TTF, OTF, WOFF or WOFF2 files. The look lasts for the visit and is never saved with the preferences; `{}` returns to WordCraft's own.
+
+## Fork source and remaining extensions
+
+This fork incorporates upstream [WordCraft v0.18.1](https://github.com/storytold/wordcraft/releases/tag/v0.18.1),
+commit [`079f478bd85df7bcc567e3bafa7d7219096f9c3c`](https://github.com/storytold/wordcraft/commit/079f478bd85df7bcc567e3bafa7d7219096f9c3c),
+and retains three extensions for embedded editing:
+
+| Extension | Why it remains | Requirement for removal |
+|---|---|---|
+| Per-command `author` on `engine.execute` | The upstream [control handler](https://github.com/storytold/wordcraft/blob/079f478bd85df7bcc567e3bafa7d7219096f9c3c/crates/ui-egui/src/control/handler.rs) executes with the session's author. `file.setAuthor` changes that shared setting. | An upstream command must sign its comments and tracked changes with the requested author, then restore the session's author and initials on success or error, including commands addressed to another document. |
+| `data` and `originalData` on `review.compare` and `review.combine` | The upstream [comparison loader](https://github.com/storytold/wordcraft/blob/079f478bd85df7bcc567e3bafa7d7219096f9c3c/crates/engine/src/cmd/tools/compare.rs) opens document paths. Browser hosts hold document bytes without a filesystem. | Both documents must be accepted as bytes with format-identifying names, preserving comparison options and tracked changes through save and reopen. |
+| `ui.hostTheme` | The upstream [UI commands](https://github.com/storytold/wordcraft/blob/079f478bd85df7bcc567e3bafa7d7219096f9c3c/crates/ui-egui/src/app/commands.rs) select WordCraft's appearance but do not accept a host palette or interface fonts. | Upstream must provide the host colours, fonts, radius, appearance, button visibility and hidden ribbon tabs described above, without saving them to preferences; resetting the theme must restore WordCraft's defaults. |
+
+Retiring an extension requires the upstream web bundle to pass its embedding checks, including
+open, edit, save and reopen, as well as the behaviour in the table. A source comparison or a
+successful build alone does not establish that compatibility. Before releasing a fork update,
+run the repository's full `cargo xtask ci` gate and qualify the resulting web bundle.
+
+The native gate on v0.18.1 passes formatting and Clippy with Rust 1.99.1 and nextest
+0.9.150, using the release's pinned font and language inputs. Two navigation tests
+fail in both this fork and the unmodified upstream release:
+`page_down_and_up_move_by_a_page_in_the_continuous_views` reaches paragraph 24 in
+Draft instead of paragraph 25 in Print Layout, and
+`page_down_and_up_never_stay_on_a_line_in_the_continuous_views` stops moving on its
+third Page Up. These assertions remain unchanged. The gate stops at those failures,
+so the later gate stages and release qualification are still required.
+
 ## Renderer selection and fallback flags
 
 WordCraft renders with wgpu. It uses **WebGPU** when the browser has it and falls back to

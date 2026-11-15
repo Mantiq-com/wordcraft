@@ -167,7 +167,7 @@ test source in File › Options › Language and on the bar's Install.
 | Tool | What it does |
 |---|---|
 | `list_commands` | every command (filter with `query`) — over 270 of them |
-| `execute` | run one command: `{command: "insert.table", params: {rows: 3, cols: 4}}` (an empty table; for a filled one use `insert_table`) |
+| `execute` | run one command: `{command: "insert.table", params: {rows: 3, cols: 4}}` (an empty table; for a filled one use `insert_table`); `author` signs its comments and tracked changes (see [Signing a command](control-protocol.md#signing-a-command)) |
 | `insert_table` | insert a filled table in one call: `{values: [["Month", "Cases"], ["January", 12]], header: true, style?}` (same as `insert.spreadsheet`) |
 | `batch` | run several commands in order |
 | `new_document` | blank, sample, letter, resume, report; opens beside the open documents |
