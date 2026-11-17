@@ -204,7 +204,8 @@ run the repository's full `cargo xtask ci` gate and qualify the resulting web bu
 `cargo xtask ci` passes formatting and Clippy with the pinned font and
 translation inputs. With nextest 0.9.150, the native stage stops after 1,986
 passes, two failures and nine skipped tests. Another 3,085 tests and the later
-gate stages do not run.
+gate stages do not run. A repeat gate reaches 1,987 passes with the same two
+failures and nine skipped tests; 3,084 tests remain unrun.
 
 Both failures are continuous-view Page Up/Page Down tests in
 `crates/engine/src/tests.rs`. At line 13362, Draft view moves to paragraph 24
@@ -214,6 +215,36 @@ where the test requires the caret to move backward. The unmodified selected
 upstream target reproduces both failures with the same toolchain and pinned
 inputs: its `cargo xtask test` run reports 1,985 passes, two failures and nine
 skipped tests before stopping. The assertions remain unchanged.
+
+### Browser validation on the selected source
+
+`packaging/web/package.sh` builds the browser app from source merge
+`50ebd3874272e4eb8b571d8f3c56389019784a3c`. Its local archive,
+`wordcraft-web-0.18.1.zip`, has SHA-256
+`6e74d27d256188531e902251b521957a89fe8e2f1b3b96b55ba7c8f2891ff105`.
+The tested page serves `wordcraft-web-dc187636931f4a47_bg.wasm`, and its
+About dialog reports `0.18.1 (50ebd387)`.
+
+Hosted DOCX creation, editing, undo/redo, ordinary Save, Save As and reopening
+pass. Ordinary Save preserves the filename and clears the unsaved flag.
+Comments and tracked insertions retain their requested authors in the saved
+XML, and an unsuccessful command restores the session author. Compare and
+Combine accept both inputs as document bytes. Reviewed and compared documents
+retain their text, comments and tracked changes through a round trip from this
+build to the published `host-theme-3` bundle and back.
+
+Host theme apply/reset, PDF export and read-only command rejection pass.
+Messages from another origin or source are ignored, and disposal unloads the
+iframe and rejects later requests. Observed runtime assets come from the host
+origin under a content policy that blocks external connections. These checks
+use synthetic documents; authenticated storage, autosave acknowledgements and
+application permissions remain unqualified. The earlier protected-range author
+issue below has not been requalified on this revision.
+
+The browser build reports two existing warnings: unused imports in
+`crates/ui-egui/src/dialogs.rs:38` and the unused `system_arabic` parameter in
+`crates/ui-egui/src/theme.rs:885`. Neither file changed from the previous fork
+revision. No warning or test was suppressed.
 
 ### Previous validation on the 2026-11-15 main revision
 
