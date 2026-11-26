@@ -246,6 +246,8 @@ impl HostTheme {
                 edge: None,
                 knob: None,
                 wells: None,
+                grip: None,
+                locator: None,
             });
         }
         Some(Arc::new(def))
