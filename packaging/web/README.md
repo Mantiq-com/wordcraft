@@ -182,18 +182,18 @@ Its fields are `{"light"?: {token: "#rrggbb"}, "dark"?: {..}, "radius"?: 0-16, "
 ## Fork source and remaining extensions
 
 This fork incorporates upstream `main` at
-[`8a047c333b239e5c5d5c9d91e2dae2cc84185439`](https://github.com/storytold/wordcraft/commit/8a047c333b239e5c5d5c9d91e2dae2cc84185439),
-retrieved on 2026-11-21, including changes after [WordCraft v0.18.1](https://github.com/storytold/wordcraft/releases/tag/v0.18.1)
-(such as the port of `crates/ui-egui` onto the shared `craft` UI framework).
-The latest stable release at retrieval is v0.18.1 at
-`079f478bd85df7bcc567e3bafa7d7219096f9c3c`. This fork continues tracking
-the upstream default branch and retains three extensions for embedded editing:
+[`62391d8aa3884f0a04da5285e5f7f244c35fa1a0`](https://github.com/storytold/wordcraft/commit/62391d8aa3884f0a04da5285e5f7f244c35fa1a0),
+retrieved on 2026-11-26 (`2026-11-26T18:56:09Z`). The latest stable release at retrieval is
+[WordCraft v0.19.1](https://github.com/storytold/wordcraft/releases/tag/v0.19.1) at
+`5d658dc033f3139926839bffd6ae0eef558c210c` (cut from pre-UI-port `09faec42ec`); this fork
+continues tracking upstream `main` (post-UI-port, workspace version `0.18.1`) and retains
+three extensions for embedded editing:
 
 | Extension | Why it remains | Requirement for removal |
 |---|---|---|
-| Per-command `author` on `engine.execute` | The upstream [control handler](https://github.com/storytold/wordcraft/blob/8a047c333b239e5c5d5c9d91e2dae2cc84185439/crates/ui-egui/src/control/handler.rs) executes with the session's author. `file.setAuthor` changes that shared setting. | An upstream command must sign its comments and tracked changes with the requested author, then restore the session's author and initials on success or error, including commands addressed to another document. |
-| `data` and `originalData` on `review.compare` and `review.combine` | The upstream [comparison loader](https://github.com/storytold/wordcraft/blob/8a047c333b239e5c5d5c9d91e2dae2cc84185439/crates/engine/src/cmd/tools/compare.rs) opens document paths. Browser hosts hold document bytes without a filesystem. | Both documents must be accepted as bytes with format-identifying names, preserving comparison options and tracked changes through save and reopen. |
-| `ui.hostTheme` | The upstream [UI commands](https://github.com/storytold/wordcraft/blob/8a047c333b239e5c5d5c9d91e2dae2cc84185439/crates/ui-egui/src/app/commands.rs) select WordCraft's appearance but do not accept a host palette, corner radius, hidden tabs/buttons or interface fonts. | Upstream must provide the host colours, fonts, radius, appearance, button visibility and hidden ribbon tabs described above, without saving them to preferences; resetting the theme must restore WordCraft's defaults. |
+| Per-command `author` on `engine.execute` | The upstream [control handler](https://github.com/storytold/wordcraft/blob/62391d8aa3884f0a04da5285e5f7f244c35fa1a0/crates/ui-egui/src/control/handler.rs) executes with the session's author. `file.setAuthor` changes that shared setting. | An upstream command must sign its comments and tracked changes with the requested author, then restore the session's author and initials on success or error, including commands addressed to another document. |
+| `data` and `originalData` on `review.compare` and `review.combine` | The upstream [comparison loader](https://github.com/storytold/wordcraft/blob/62391d8aa3884f0a04da5285e5f7f244c35fa1a0/crates/engine/src/cmd/tools/compare.rs) opens document paths. Browser hosts hold document bytes without a filesystem. | Both documents must be accepted as bytes with format-identifying names, preserving comparison options and tracked changes through save and reopen. |
+| `ui.hostTheme` | The upstream [UI commands](https://github.com/storytold/wordcraft/blob/62391d8aa3884f0a04da5285e5f7f244c35fa1a0/crates/ui-egui/src/app/commands.rs) select WordCraft's appearance but do not accept a host palette, corner radius, hidden tabs/buttons or interface fonts. | Upstream must provide the host colours, fonts, radius, appearance, button visibility and hidden ribbon tabs described above, without saving them to preferences; resetting the theme must restore WordCraft's defaults. |
 
 Retiring an extension requires the upstream web bundle to pass its embedding checks, including
 open, edit, save and reopen, as well as the behaviour in the table. A source comparison or a
@@ -202,54 +202,69 @@ run the repository's full `cargo xtask ci` gate and qualify the resulting web bu
 
 ### Native validation on the selected source
 
-With Rust 1.99.1, nextest 0.9.152, `CRAFT_I18N_DIR` on `craft-i18n` commit
-`e56d26244bbac099bfd42e23fb12f78a4be418a7` (`craft-i18n.rev`) and `CRAFT_FONTS_DIR` on
-`craft-fonts` commit `b076417b5880bd4154bd22f00695b1d28c6bea83`:
+With Rust `1.102.0-nightly (6c709eb42 2026-11-25)`, nextest `0.9.152`, `CRAFT_I18N_DIR` on
+`craft-i18n` commit `e56d26244bbac099bfd42e23fb12f78a4be418a7` (`craft-i18n.rev`) and
+`CRAFT_FONTS_DIR` on `craft-fonts` commit `baf0f2ccd1745893aa6337a35141ec12a23d4fc1`:
 
-- `cargo xtask ci` passes `fmt` and `clippy --workspace --all-targets -- -D warnings`, then stops at `test`.
-- Running the remaining gate stages individually passes `language`, `assets`, `layers`, `wasm` and `doctest`.
-- Running the full workspace nextest suite with `--no-fail-fast` completes 4,744 tests: 4,738 passed, 6 failed, 6 skipped. All targeted fork tests (`theme::host`, `request_author`, `compare` and `wordcraft-mcp`) pass.
-- The six failures in the main test stage are:
-  - `wordcraft-engine` `tests::page_down_and_up_move_by_a_page_in_the_continuous_views` (`crates/engine/src/tests.rs:14252`): Draft reaches paragraph 24 instead of paragraph 25.
-  - `wordcraft-engine` `tests::page_down_and_up_never_stay_on_a_line_in_the_continuous_views` (`crates/engine/src/tests.rs:14287`): the third Page Up remains at offset 1 in paragraph 0.
-  - Four `wordcraft-ui-egui` `egui_kittest::wgpu` tests (`objects::tests::a_dragged_shape_leaves_the_text_behind_it`, `objects::tests::a_level_line_dragged_by_its_middle_moves_and_stays_level`, `objects::tests::rotation_drag_turns_picture_pixels_live_and_commits_once_or_cancels`, `theme::legacy::tests::dark_interface_text_is_only_a_little_heavier_than_light_interface_text`), which fail with `No adapter found` on a headless host without a GPU adapter.
-- The `i18n-report` stage (`i18n::audit::untranslated_interface_text`, `crates/ui-egui/src/i18n/audit.rs:464`) fails on 11 host system font names appearing in the Home font dropdown (`DejaVu*`, `Fira*`, `Free*`).
-- An independent run of all seven failing tests on the unmodified selected upstream commit `8a047c333b239e5c5d5c9d91e2dae2cc84185439` reproduces all seven failures identically. All assertions remain unchanged.
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --lib --bins -- -D warnings`,
+  `cargo xtask assets`, `cargo xtask layers`, `cargo xtask wasm`, `cargo xtask language`,
+  `cargo test --workspace --doc`, and `cargo xtask i18n-report` (1/1) all pass.
+- Under nightly `1.102.0-nightly`, `cargo clippy --workspace --all-targets -- -D warnings`
+  reports 39 `clippy::unnecessary_to_owned` errors solely in unchanged upstream
+  `wordcraft-engine` test code; zero errors occur in fork-modified files.
+- All targeted fork tests (`theme::host`, `request_author`, `compare` and `wordcraft-mcp`)
+  pass.
+- Running the full workspace nextest suite with `--no-fail-fast` completes 4,966 tests:
+  4,960 passed, 6 failed, 6 skipped:
+  - `wordcraft-engine` `tests::page_down_and_up_move_by_a_page_in_the_continuous_views`
+  - `wordcraft-engine` `tests::page_down_and_up_never_stay_on_a_line_in_the_continuous_views`
+  - Four `wordcraft-ui-egui` `egui_kittest::wgpu` tests
+    (`objects::tests::a_dragged_shape_leaves_the_text_behind_it`,
+    `objects::tests::a_level_line_dragged_by_its_middle_moves_and_stays_level`,
+    `objects::tests::rotation_drag_turns_picture_pixels_live_and_commits_once_or_cancels`,
+    `theme::legacy::tests::dark_interface_text_is_only_a_little_heavier_than_light_interface_text`),
+    which fail with `No adapter found` on a headless host without a GPU adapter.
+- An independent run of all six failing tests on the unmodified selected upstream commit
+  `62391d8aa3884f0a04da5285e5f7f244c35fa1a0` reproduces all six failures identically
+  (6 run, 0 passed, 6 failed). All assertions remain unchanged.
 
 ### Browser validation on the selected source
 
 `packaging/web/package.sh` builds the browser app from source merge
-`f8ec9e59a1a850bc3dbd661450f863164741aab3` with Rust 1.99.1, Trunk 0.22.2 and
-wasm-bindgen 0.2.129 (removing `.trunk-lock` before zipping). Its local archive,
-`wordcraft-web-0.18.1.zip` (36 MB), has SHA-256
-`ffb76e715b24e60b250aef6f3401e7cd67a4e558ba93b782313f4cc177d02da8` and serves
-`wordcraft-web-d2b5b6d1d862f0b_bg.wasm`.
+`58031efa09e33ea49dfa3b272dcd1d535dacaa19` with Rust `1.102.0-nightly (6c709eb42 2026-11-25)`,
+Trunk `0.22.2` and `wasm-bindgen` `0.2.129` (removing `.trunk-lock` before zipping). Its local
+archive, `wordcraft-web-0.18.1.zip` (38 MB), has SHA-256
+`5395cd61c508ebddf690ec337dbd2587f4f4c3529157d6566252cc8b3dce5e70` and serves
+`wordcraft-web-feec29f759815884_bg.wasm` (SHA-256
+`62e3ea7e84b5ca2daf347a5201cb8d156255927171992c11cdde46fc7bbd8f2a`).
 
-Hosted DOCX creation, editing, undo/redo, ordinary Save (8,997 bytes), Save As
-(8,968 bytes) and reopening pass. Ordinary Save preserves the filename and clears the
-unsaved flag. Saved DOCX XML retains tracked insertions by `Revision Assistant` and
-comments by `Review Assistant` and the session author `Local Reviewer`, confirming
-that a failed command with a requested author restores the session author. Compare and
-Combine accept both inputs as base64 bytes (`originalData` and `data`) and preserve
-tracked changes through save and reopen. Reviewed and compared documents round-trip
-between this build and the published `host-theme-3` bundle in both directions with
-their text preserved.
+Hosted headless Chrome (`158.0.8127.36`, Linux) checks through the real parent-page bridge
+under a CSP blocking external connections passed DOCX creation, editing, undo/redo, Save As
+(`6,945` bytes, `saveAs: true`), ordinary Save (`8,969` bytes, `saveAs: false`), and
+reopening. Saved DOCX XML retains tracked insertions by `Revision Assistant` and comments by
+`Review Assistant` and the session author `Local Reviewer` (confirming a failing authored
+command restores the session author). `review.compare` and `review.combine` accept both
+inputs as base64 bytes (`originalData` and `data`) and preserve tracked insertions/deletions
+attributed to `Compare Author` through save (`7,049` bytes) and reopen. Reviewed and compared
+documents round-trip in both directions with the published `host-theme-4` bundle.
 
-`ui.hostTheme` apply (dark palette, custom accent, 8 pt corner radius, hidden Discord
-and Share buttons, hidden `Developer` and `Citations` tabs via legacy `hideTabs: ["Zotero", "Developer"]`,
-and host TTF interface font) and `{}` reset pass and are visually verified in screenshots.
-PDF export returns `%PDF-1.7` bytes with `saveAs: false`, and `review.restrict`
-(`readOnly`) rejects edits. Messages from another origin or source are ignored,
-disposal unloads the iframe and rejects later requests, and all observed runtime assets
-load from the host origin under a CSP blocking external connections (zero console or
-page errors).
+`ui.hostTheme` apply (dark appearance, accent `#885f1a`, 8 pt corner radius, hidden Discord
+and Share buttons, hidden `Citations` and `Developer` tabs via `hideTabs: ["Zotero", "Developer"]`,
+and host TTF interface font) was visually verified in a screenshot, and `{}` reset completed
+cleanly. PDF export returns `%PDF-1.7` (`10,042` bytes), and `review.restrict` (`readOnly`)
+refuses edits. Origin/source spoofs are ignored, disposal clears the iframe `src` and rejects
+later requests, and all runtime assets load from the host origin with zero console errors or
+page exceptions. Protected-range per-command author behavior was not re-tested on this build;
+assume the pre-existing requirement for a trusted command caller still applies. These synthetic
+checks do not qualify authenticated application storage, autosave acknowledgements or
+permissions.
 
-The pre-existing protected-range per-command author behavior persists on this build: in
-a read-only synthetic DOCX with a `<w:permStart w:ed="Allowed Reviewer"/>` region, an
-insertion as `Other Reviewer` is rejected, while supplying `author: "Allowed Reviewer"`
-on `engine.execute` permits the insertion. The command API therefore requires a trusted
-caller. These synthetic checks do not qualify authenticated application storage,
-autosave acknowledgements or permissions.
+### Previous validation on the 2026-11-21 main revision
+
+The release package built from `f8ec9e59a1a850bc3dbd661450f863164741aab3` on upstream
+`8a047c333b239e5c5d5c9d91e2dae2cc84185439` (`wordcraft-web-0.18.1.zip`, SHA-256
+`ffb76e715b24e60b250aef6f3401e7cd67a4e558ba93b782313f4cc177d02da8`, published as
+`host-theme-4`). Those results do not qualify the `62391d8a` source above.
 
 ### Previous validation on the 2026-11-17 main revision
 
